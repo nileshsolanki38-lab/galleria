@@ -17,18 +17,94 @@ struct CollageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("Collage Maker", systemImage: "square.grid.2x2")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Text(photos.isEmpty ? "No selection" : "\(photos.count) photos")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Close") { dismiss() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+            // Top bar: the layout is a row of icons here instead of a
+            // dropdown, and every action is a single-tap icon button.
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    Label("Collage Maker", systemImage: "square.grid.2x2")
+                        .font(.title3.weight(.semibold))
+
+                    Spacer()
+
+                    Text(photos.isEmpty ? "No selection" : "\(photos.count) photos")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    topButton("shuffle", "Shuffle photo order", disabled: photos.count < 2) {
+                        photos.shuffle()
+                        renderSoon()
+                    }
+                    topButton("arrow.clockwise", "Refresh preview") {
+                        renderSoon()
+                    }
+                    topButton("square.and.arrow.up",
+                              "Export Collage (.jpg)…",
+                              disabled: photos.isEmpty || isRendering) {
+                        exportCollage()
+                    }
+                    topButton("xmark", "Close") { dismiss() }
+                }
+
+                // Style bar: layout, canvas and colours as one-tap controls.
+                HStack(spacing: 12) {
+                    HStack(spacing: 3) {
+                        ForEach(CollageLayout.allCases, id: \.rawValue) { l in
+                            styleButton(active: recipe.layout == l,
+                                        symbol: layoutIcon(l),
+                                        help: l.displayName) {
+                                recipe.layout = l
+                            }
+                        }
+                    }
+                    .padding(4)
+                    .background(RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.primary.opacity(0.05)))
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 1, height: 20)
+
+                    Picker("Canvas", selection: $recipe.canvasAspect) {
+                        Text("Square").tag("square")
+                        Text("4:3").tag("4:3")
+                        Text("16:9").tag("16:9")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 205)
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 1, height: 20)
+
+                    HStack(spacing: 6) {
+                        ForEach(borderChoices, id: \.hex) { c in
+                            swatch(color: c.color,
+                                   hollow: false,
+                                   selected: recipe.borderColor == c.hex,
+                                   help: "Border \(c.name)") {
+                                recipe.borderColor = c.hex
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 5) {
+                        ForEach(backgroundChoices, id: \.hex) { bg in
+                            swatch(color: bg.color,
+                                   hollow: bg.hex == "none",
+                                   selected: recipe.background == bg.hex,
+                                   help: "Background \(bg.name)") {
+                                recipe.background = bg.hex
+                            }
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(16)
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
 
             Divider()
 
@@ -36,15 +112,9 @@ struct CollageView: View {
                 // Controls — frosted panel (scrollable, always reachable)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("Layout")
+                        Text("Layout — icons in the top bar")
                             .font(.subheadline.weight(.semibold))
-                        Picker("Layout", selection: $recipe.layout) {
-                            ForEach(CollageLayout.allCases, id: \.rawValue) { l in
-                                Text(l.displayName).tag(l)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
+                            .foregroundStyle(.secondary)
 
                         if recipe.layout == .pictureInPicture {
                             VStack(alignment: .leading, spacing: 6) {
@@ -106,43 +176,9 @@ struct CollageView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Slider(value: $recipe.borderWidth, in: 0...12, step: 1)
-                            Picker("Border color", selection: $recipe.borderColor) {
-                                Text("Black").tag("black")
-                                Text("White").tag("white")
-                                Text("Grey").tag("grey")
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                        }
-
-                        HStack(spacing: 10) {
-                            Text("Canvas")
-                                .font(.callout)
-                            Spacer()
-                            Picker("Canvas", selection: $recipe.canvasAspect) {
-                                Text("Square").tag("square")
-                                Text("4:3").tag("4:3")
-                                Text("16:9").tag("16:9")
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                        }
-
-                        HStack(spacing: 10) {
-                            Text("Background")
-                                .font(.callout)
-                            Spacer()
-                            Picker("Background", selection: $recipe.background) {
-                                Text("White").tag("white")
-                                Text("Black").tag("black")
-                                Text("None (transparent)").tag("none")
-                                Text("Grey").tag("#E8E8E8")
-                                Text("Blue").tag("#4A90D9")
-                                Text("Warm").tag("#F5E6CC")
-                                Text("Rose").tag("#F5D5D5")
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
+                            Text("Border colour: swatches in the top bar")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
 
                         VStack(alignment: .leading, spacing: 6) {
@@ -152,36 +188,6 @@ struct CollageView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .font(.callout)
                         }
-
-                        HStack(spacing: 8) {
-                            Button {
-                                photos.shuffle()
-                                renderSoon()
-                            } label: {
-                                Label("Shuffle", systemImage: "shuffle")
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(photos.count < 2)
-                            Button {
-                                renderSoon()
-                            } label: {
-                                Label("Refresh", systemImage: "arrow.clockwise")
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-
-                        Divider()
-
-                        Button {
-                            exportCollage()
-                        } label: {
-                            Label(isRendering ? "Rendering…" : "Export Collage (.jpg)…", systemImage: "square.and.arrow.up")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(photos.isEmpty || isRendering)
 
                         if !status.isEmpty {
                             Text(status).font(.caption).foregroundStyle(.secondary)
@@ -233,6 +239,107 @@ struct CollageView: View {
         .frame(width: 960, height: 660)
         .onAppear { resolvePhotos(); renderSoon() }
         .onChange(of: recipe) { _, _ in renderSoon() }
+    }
+
+    // MARK: - Top-bar controls
+
+    private struct NamedColor {
+        let name: String
+        let hex: String
+        let color: Color
+    }
+
+    private var borderChoices: [NamedColor] {
+        [NamedColor(name: "Black", hex: "black", color: .black),
+         NamedColor(name: "White", hex: "white", color: .white),
+         NamedColor(name: "Grey", hex: "grey", color: Color(white: 0.75))]
+    }
+
+    private var backgroundChoices: [NamedColor] {
+        [NamedColor(name: "White", hex: "white", color: .white),
+         NamedColor(name: "Black", hex: "black", color: .black),
+         NamedColor(name: "Transparent", hex: "none", color: .clear),
+         NamedColor(name: "Grey", hex: "#E8E8E8", color: hexColor("#E8E8E8")),
+         NamedColor(name: "Blue", hex: "#4A90D9", color: hexColor("#4A90D9")),
+         NamedColor(name: "Warm", hex: "#F5E6CC", color: hexColor("#F5E6CC")),
+         NamedColor(name: "Rose", hex: "#F5D5D5", color: hexColor("#F5D5D5"))]
+    }
+
+    private func layoutIcon(_ layout: CollageLayout) -> String {
+        switch layout {
+        case .grid: return "square.grid.2x2.fill"
+        case .pictureInPicture: return "picture.in.picture"
+        case .mosaic: return "rectangle.split.2x1"
+        case .freestyle: return "square.on.square"
+        }
+    }
+
+    /// Circular icon action button for the collage top bar.
+    private func topButton(_ symbol: String, _ help: String,
+                           disabled: Bool = false,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.primary.opacity(0.06)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.primary)
+        .opacity(disabled ? 0.35 : 1)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    /// Selectable icon (layout styles) with an accent-backed active state.
+    private func styleButton(active: Bool, symbol: String, help: String,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(active ? Color.accentColor : Color.primary.opacity(0.06)))
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// Small colour circle; gets an accent ring when selected.
+    private func swatch(color: Color, hollow: Bool, selected: Bool,
+                        help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                if hollow {
+                    Circle()
+                        .fill(.thinMaterial)
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.35), lineWidth: 0.8))
+                } else {
+                    Circle().fill(color)
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+                }
+                if selected {
+                    Circle()
+                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                        .padding(-2)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private func hexColor(_ hex: String) -> Color {
+        let cleaned = hex.replacingOccurrences(of: "#", with: "")
+        var value: UInt64 = 0
+        Scanner(string: cleaned).scanHexInt64(&value)
+        return Color(red: Double((value >> 16) & 0xFF) / 255,
+                     green: Double((value >> 8) & 0xFF) / 255,
+                     blue: Double(value & 0xFF) / 255)
     }
 
     private func resolvePhotos() {
