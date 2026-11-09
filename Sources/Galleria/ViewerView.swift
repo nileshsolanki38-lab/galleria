@@ -134,7 +134,7 @@ struct ViewerView: View {
     /// blurred backdrop and no letterboxing. Full screen still uses the immersive
     /// blurred presentation, whatever mode the viewer was opened in.
     private var isCompactPresentation: Bool { presentation == "compact" }
-    private var isCompactWindow: Bool { isCompactPresentation && !fullScreenActive }
+    private var isCompactWindow: Bool { isCompactPresentation && !isFullScreen }
 
     private var filmstripThumb: CGFloat { CGFloat(filmstripThumbSize) }
     private var filmstripBarHeight: CGFloat { filmstripThumb + 20 }
@@ -145,7 +145,12 @@ struct ViewerView: View {
     var body: some View {
         ZStack {
             if isCompactWindow {
-                Color.black.ignoresSafeArea()
+                // Glass (transparent) backdrop in compact mode so the photo
+                // sits on the same frosted material as the floating controls,
+                // instead of a flat black slab.
+                Color.clear
+                    .background(.ultraThinMaterial)
+                    .ignoresSafeArea()
             } else {
                 backdropLayer
             }
@@ -204,7 +209,7 @@ struct ViewerView: View {
         .contextMenu { viewerContextMenu }
         // In a compact window the photo is the window: don't let the title bar's
         // safe area introduce even a single pixel of margin.
-        .ignoresSafeArea((isCompactWindow || fullScreenActive) ? .container : [], edges: .all)
+        .ignoresSafeArea((isCompactWindow || isFullScreen) ? .container : [], edges: .all)
         .animation(.easeInOut(duration: 0.22), value: chromeVisible)
         .animation(.easeInOut(duration: 0.22), value: showFilmstrip)
         .animation(.easeInOut(duration: 0.22), value: showInfo)
@@ -502,15 +507,15 @@ struct ViewerView: View {
             return EdgeInsets(
                 top: chromeVisible && showTopBar ? 64 : 0,
                 leading: showEdit ? 280 : 0,
-                bottom: chromeVisible && showFilmstrip ? filmstripBarHeight + 26 : 0,
+                bottom: showFilmstrip ? filmstripBarHeight + 26 : 0,
                 trailing: showInfo ? 280 : 0
             )
         }
         return EdgeInsets(
             top: showTopBar && chromeVisible ? 76 : 0,
-            leading: showEdit && chromeVisible ? 288 : 0,
-            bottom: showFilmstrip && chromeVisible ? filmstripInset : 0,
-            trailing: showInfo && chromeVisible ? 288 : 0
+            leading: showEdit ? 288 : 0,
+            bottom: showFilmstrip ? filmstripInset : 0,
+            trailing: showInfo ? 288 : 0
         )
     }
 
