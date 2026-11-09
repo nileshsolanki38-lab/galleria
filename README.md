@@ -20,6 +20,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/nileshsolanki38-lab/galleria/releases/latest">
+    <img src="https://img.shields.io/github/v/release/nileshsolanki38-lab/galleria?label=Download&color=brightgreen" alt="Download" />
+  </a>
+</p>
+
+<p align="center">
   <a href="#-quick-start">Quick start</a> ·
   <a href="#-features">Features</a> ·
   <a href="#-screenshots">Screenshots</a> ·
@@ -35,6 +41,20 @@
 - 🖼 **Non-destructive** — edits are JSON recipes in SQLite; the original file is never touched.
 - 🪶 **Lightweight** — Swift + SwiftUI + SQLite, zero third-party dependencies.
 - 🆓 **Free & open source** (MIT).
+
+---
+
+## 📥 Download & install (no developer tools needed)
+
+**For everyone** — no Xcode, no Terminal, no command line:
+
+1. Go to the [**Releases page**](https://github.com/nileshsolanki38-lab/galleria/releases/latest).
+2. Download **`Galleria.dmg`**.
+3. Double-click the DMG to mount it.
+4. Drag **Galleria.app** into the **Applications** folder.
+5. Eject the DMG and launch Galleria from Applications (or Spotlight).
+
+> macOS may warn about an unidentified developer the first time — right-click → **Open** → **Open** to bypass (the app is ad-hoc signed). This only happens once.
 
 ---
 

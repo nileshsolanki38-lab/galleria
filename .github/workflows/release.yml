@@ -17,16 +17,19 @@ jobs:
       - name: Build
         run: ./Scripts/build.sh
 
-      - name: Package
+      - name: Create DMG
         run: |
-          cd dist
-          ditto -c -k --keepParent Galleria.app Galleria-macos.zip
-          shasum -a 256 Galleria-macos.zip > Galleria-macos.zip.sha256
+          STAGE=$(mktemp -d)
+          cp -R dist/Galleria.app "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f dist/Galleria.dmg
+          hdiutil create -volname "Galleria" -srcfolder "$STAGE" -ov -format UDZO dist/Galleria.dmg
+          shasum -a 256 dist/Galleria.dmg > dist/Galleria.dmg.sha256
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/Galleria-macos.zip
-            dist/Galleria-macos.zip.sha256
+            dist/Galleria.dmg
+            dist/Galleria.dmg.sha256
           generate_release_notes: true
