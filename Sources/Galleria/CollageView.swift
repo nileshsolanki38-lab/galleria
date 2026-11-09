@@ -268,7 +268,7 @@ struct CollageView: View {
     private func layoutIcon(_ layout: CollageLayout) -> String {
         switch layout {
         case .grid: return "square.grid.2x2.fill"
-        case .pictureInPicture: return "picture.in.picture"
+        case .pictureInPicture: return "rectangle.on.rectangle.fill"
         case .mosaic: return "rectangle.split.2x1"
         case .freestyle: return "square.on.square"
         }

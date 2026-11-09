@@ -2253,7 +2253,6 @@ private struct FilmstripCell: View {
         .scaleEffect(selected ? 1 : 0.96)
         .animation(.easeInOut(duration: 0.18), value: selected)
         .onHover { hovering in onHover?(hovering) }
-        .help(photo.filename)
         .task(id: "\(photo.id)-\(Int(size))") {
             image = await ThumbnailService.shared.thumbnail(
                 path: photo.path, mtime: photo.mtime, size: size * 2
@@ -2284,7 +2283,6 @@ private struct FilmstripHoverPreview: View {
                 .font(.caption2.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help(photo.filename)
         }
         .padding(8)
         .glassSurface(cornerRadius: 14)

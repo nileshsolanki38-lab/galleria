@@ -1187,7 +1187,6 @@ struct PhotoCell: View {
                     .truncationMode(.middle)
                     .foregroundStyle(selected ? Color.accentColor : .secondary)
                     .frame(width: size)
-                    .help(photo.filename)
             }
         }
     }
@@ -1251,7 +1250,6 @@ struct PhotoCell: View {
                 onDouble: onOpen
             )
         }
-        .help(photo.filename)
         .task(id: photo.id) {
             let loaded = await ThumbnailService.shared.thumbnail(
                 path: photo.path, mtime: photo.mtime, size: size * 2

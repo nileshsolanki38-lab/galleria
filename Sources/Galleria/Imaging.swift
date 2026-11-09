@@ -244,15 +244,35 @@ enum Editor {
         var ci = input
         guard !recipe.isIdentity else { return ci }
 
-        // Straighten (small angle, before big rotate) + auto enhance
+        // Straighten (small angle, before big rotate) + auto enhance.
+        // The rotation is scaled to COVER the original frame, then cropped back
+        // to it — without the cover scale the rotated corners leave transparent
+        // slivers that appeared as white lines at the photo edges.
         if recipe.straighten != 0 {
             let rad = recipe.straighten * .pi / 180.0
-            let center = CGPoint(x: ci.extent.midX, y: ci.extent.midY)
+            let extent = input.extent
+            let w = extent.width
+            let h = extent.height
+            guard w > 0, h > 0 else {
+                let center = CGPoint(x: ci.extent.midX, y: ci.extent.midY)
+                let t = CGAffineTransform.identity
+                    .translatedBy(x: center.x, y: center.y)
+                    .rotated(by: CGFloat(rad))
+                    .translatedBy(x: -center.x, y: -center.y)
+                ci = ci.transformed(by: t)
+                return ci
+            }
+            let cosA = abs(cos(CGFloat(rad)))
+            let sinA = abs(sin(CGFloat(rad)))
+            let ratio = max(w, h) / min(w, h)
+            let cover = cosA + sinA * ratio
+            let center = CGPoint(x: extent.midX, y: extent.midY)
             let t = CGAffineTransform.identity
                 .translatedBy(x: center.x, y: center.y)
+                .scaledBy(x: cover, y: cover)
                 .rotated(by: CGFloat(rad))
                 .translatedBy(x: -center.x, y: -center.y)
-            ci = ci.transformed(by: t)
+            ci = ci.transformed(by: t).cropped(to: extent)
         }
         if recipe.autoEnhance {
             for filter in ci.autoAdjustmentFilters() {
