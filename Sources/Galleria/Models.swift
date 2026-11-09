@@ -152,6 +152,16 @@ enum CollageLayout: String, Codable, CaseIterable {
     }
 }
 
+/// Per-photo crop adjustment inside a collage tile: choose which part of the
+/// photo is visible (pan + zoom), fit vs fill, and a quarter turn.
+struct CollageCellAdjust: Codable, Equatable {
+    var zoom: Double = 1          // 1...3
+    var panX: Double = 0.5        // 0...1 crop focus across the overflow
+    var panY: Double = 0.5        // 0...1
+    var fit: Bool = false         // false = fill the tile (crop), true = fit inside
+    var quarterTurns: Int = 0     // 0...3 clockwise
+}
+
 struct CollageRecipe: Codable, Equatable {
     var layout: CollageLayout = .grid
     var spacing: Double = 8       // points between tiles, 0...32
@@ -164,6 +174,12 @@ struct CollageRecipe: Codable, Equatable {
     var pipSize: Double = 0.38    // 0.15...0.6 fraction for Picture-in-Picture
     var pipX: Double = 0.75       // 0...1 position
     var pipY: Double = 0.75
+    var cells: [String: CollageCellAdjust] = [:]  // keyed by photo id
+    var shadow: Bool = false      // drop shadow under tiles
+
+    func cellAdjust(for id: String) -> CollageCellAdjust {
+        cells[id] ?? CollageCellAdjust()
+    }
 
     static let `default` = CollageRecipe()
 }

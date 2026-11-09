@@ -10,10 +10,13 @@ struct CollageView: View {
     let photoIDs: [Int64]
 
     @State private var recipe = CollageRecipe.default
-    @State private var preview: NSImage?
+    @State private var preview: CollageEngine.Result?
     @State private var status = ""
     @State private var photos: [Photo] = []
     @State private var isRendering = false
+    @State private var selectedCellKey: String?
+    @State private var pinchBase: (String, Double)?
+    @State private var renderPending = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +33,9 @@ struct CollageView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    topButton("folder", "Pick a folder of photos", disabled: isRendering) {
+                        pickFolder()
+                    }
                     topButton("shuffle", "Shuffle photo order", disabled: photos.count < 2) {
                         photos.shuffle()
                         renderSoon()
@@ -189,6 +195,115 @@ struct CollageView: View {
                                 .font(.callout)
                         }
 
+                        // Per-photo crop: pick what part of each photo shows.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Per-photo crop")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            if photos.isEmpty {
+                                Text("Pick photos to adjust them.")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            } else {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(Array(photos.enumerated()), id: \.element.id) { i, p in
+                                            CellThumb(photo: p,
+                                                      selected: selectedCellKey == String(p.id) ? true
+                                                        : (selectedCellKey == nil && i == 0),
+                                                      tag: i + 1) {
+                                                selectedCellKey = String(p.id)
+                                            }
+                                        }
+                                    }
+                                }
+                                if let key = selectedCellKey ?? photos.first.map({ String($0.id) }), !key.isEmpty {
+                                    let adj = recipe.cells[key] ?? CollageCellAdjust()
+                                    Picker("Tile fill", selection: Binding(
+                                        get: { adj.fit },
+                                        set: { fit in mutCell(key) { $0.fit = fit } })) {
+                                        Text("Fill tile").tag(false)
+                                        Text("Fit whole photo").tag(true)
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .labelsHidden()
+                                    .frame(width: 220)
+
+                                    HStack {
+                                        Text("Zoom").font(.callout)
+                                        Spacer()
+                                        Text(String(format: "%.2fx", adj.zoom))
+                                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                    }
+                                    Slider(value: Binding(
+                                        get: { adj.zoom }, set: { v in mutCell(key) { $0.zoom = v } }), in: 1...3)
+
+                                    HStack {
+                                        Text("Crop X").font(.caption)
+                                        Slider(value: Binding(
+                                            get: { adj.panX }, set: { v in mutCell(key) { $0.panX = v } }), in: 0...1)
+                                    }
+                                    HStack {
+                                        Text("Crop Y").font(.caption)
+                                        Slider(value: Binding(
+                                            get: { adj.panY }, set: { v in mutCell(key) { $0.panY = v } }), in: 0...1)
+                                    }
+
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            mutCell(key) { $0.quarterTurns = (($0.quarterTurns + 3) % 4) }
+                                        } label: {
+                                            Image(systemName: "rotate.left")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        Button {
+                                            mutCell(key) { $0.quarterTurns = ($0.quarterTurns + 1) % 4 }
+                                        } label: {
+                                            Image(systemName: "rotate.right")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        Spacer()
+                                        Button("Crop reset", role: .destructive) {
+                                            recipe.cells[key] = nil
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+
+                                    Text("Drag inside a photo in the preview to choose the crop, pinch or pull Zoom to fill it better.")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+
+                        // Polish
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Polish")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Toggle("Tile drop shadows", isOn: $recipe.shadow)
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                        }
+
+                        // Library source
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Library source")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Button("Pick photos…") { pickPhotos() }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                Button("Pick folder…") { pickFolder() }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                            }
+                            Text("A folder loads every photo inside it, filename order.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+
                         if !status.isEmpty {
                             Text(status).font(.caption).foregroundStyle(.secondary)
                         }
@@ -199,9 +314,7 @@ struct CollageView: View {
                             .fixedSize(horizontal: false, vertical: true)
 
                         if photos.isEmpty {
-                            Button("Pick photos…") { pickPhotos() }
-                                .buttonStyle(.bordered)
-                            Text("You opened the collage maker with no selection. Pick images on disk to start.")
+                            Text("You opened the collage maker with no selection — use “Library source” above to start.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -210,15 +323,53 @@ struct CollageView: View {
                 }
                 .frame(width: 320)
 
-                // Preview
+                // Preview with an invisible per-cell overlay: drag to choose
+                // the crop, pinch to zoom, tap to select the photo.
                 ZStack {
                     Color(nsColor: .underPageBackgroundColor)
-                    if let preview {
-                        Image(nsImage: preview)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .padding(24)
-                            .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
+                    if let result = preview, let bitmap = result.image {
+                        GeometryReader { geo in
+                            let canvas = result.plan.canvasSize
+                            let cells = result.plan.cells
+                            let scale = min((geo.size.width - 48) / max(canvas.width, 1),
+                                            (geo.size.height - 48) / max(canvas.height, 1))
+                            let dispW = canvas.width * scale
+                            let dispH = canvas.height * scale
+                            let ox = (geo.size.width - dispW) / 2
+                            let oy = (geo.size.height - dispH) / 2
+                            ZStack(alignment: .topLeading) {
+                                Image(nsImage: bitmap)
+                                    .resizable()
+                                    .frame(width: dispW, height: dispH)
+                                    .offset(x: ox, y: oy)
+                                ForEach(0..<min(photos.count, cells.count), id: \.self) { i in
+                                    let r = cells[i]
+                                    let cellW = max(0, r.width) * scale
+                                    let cellH = max(0, r.height) * scale
+                                    CropCellOverlay(
+                                        selected: selectedCellKey == result.keys[i],
+                                        indexLabel: photoName(i),
+                                        onDrag: { t in
+                                            handleCellPan(key: result.keys[i], index: i,
+                                                          scale: scale, translation: t)
+                                        },
+                                        onMagnify: { m in
+                                            let key = result.keys[i]
+                                            if pinchBase?.0 != key {
+                                                pinchBase = (key, recipe.cells[key]?.zoom ?? 1)
+                                            }
+                                            let base = pinchBase?.1 ?? 1
+                                            mutCell(key) { $0.zoom = base * m }
+                                        },
+                                        onEnd: { pinchBase = nil },
+                                        onTap: { selectedCellKey = result.keys[i] })
+                                        .frame(width: cellW, height: cellH)
+                                        .offset(x: ox + r.minX * scale,
+                                                y: oy + (canvas.height - r.maxY) * scale)
+                                }
+                            }
+                        }
+                        .padding(24)
                     } else {
                         VStack(spacing: 10) {
                             Image(systemName: "photo.stack")
@@ -353,8 +504,19 @@ struct CollageView: View {
         photos = found
     }
 
+    /// Coalesces bursts of recipe changes (sliders, drags) into one render.
     private func renderSoon() {
         guard !photos.isEmpty else { return }
+        renderPending += 1
+        let gen = renderPending
+        isRendering = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            guard gen == renderPending else { return }
+            renderNow()
+        }
+    }
+
+    private func renderNow() {
         isRendering = true
         let paths = photos.map(\.path)
         let ids = photos.map(\.id)
@@ -365,12 +527,82 @@ struct CollageView: View {
                 let r = LibraryStore.shared.loadEdit(for: ids[i])
                 if let img = Editor.render(path: p, recipe: r, maxPixel: 900) { images.append(img) }
             }
-            let out = CollageEngine.render(images: images, recipe: rec)
+            let out = CollageEngine.render(images: images, keys: ids.map(String.init), recipe: rec)
             DispatchQueue.main.async {
                 preview = out
                 isRendering = false
             }
         }
+    }
+
+    /// Adjusted cell math shared by the drag overlay and the sidebar controls.
+    private func mutCell(_ key: String, _ change: (inout CollageCellAdjust) -> Void) {
+        var adj = recipe.cells[key] ?? CollageCellAdjust()
+        change(&adj)
+        adj.zoom = min(3, max(1, adj.zoom))
+        adj.panX = min(1, max(0, adj.panX))
+        adj.panY = min(1, max(0, adj.panY))
+        recipe.cells[key] = adj
+    }
+
+    private let imageExtensions = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif",
+                                   "webp", "gif", "bmp", "avif"]
+
+    /// Loads every photo in a chosen folder, filename order, ready for collage.
+    private func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.prompt = "Use Folder"
+        panel.message = "Choose a folder of photos for the collage"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let folderPath = LibraryStore.canonical(url).path
+        status = "Indexing \(url.lastPathComponent)…"
+        // Handing the library one file indexes the whole folder in the background.
+        let files = ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
+            .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard let first = files.first else {
+            status = "No photos found in that folder"
+            return
+        }
+        library.openPhoto(at: first)
+        collectFolderPhotos(folderPath, attempt: 1)
+    }
+
+    private func collectFolderPhotos(_ folderPath: String, attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            let items = library.photos
+                .filter { $0.folder == folderPath }
+                .sorted { $0.filename < $1.filename }
+            if !items.isEmpty {
+                photos = items
+                selectedCellKey = nil
+                let name = folderPath.split(separator: "/").last.map(String.init) ?? "folder"
+                status = "Loaded \(items.count) photos from “\(name)”"
+                renderSoon()
+            } else if attempt < 4 {
+                collectFolderPhotos(folderPath, attempt: attempt + 1)
+            } else {
+                status = "No photos found in that folder"
+            }
+        }
+    }
+
+    /// Drag-to-crop: view translation mapped into engine pan units 1:1 using
+    /// the overflow the engine itself reported for that tile.
+    private func handleCellPan(key: String, index: Int, scale: CGFloat, translation: CGSize) {
+        guard let result = preview, index < result.overflows.count, scale > 0.0001 else { return }
+        let (ovw, ovh) = result.overflows[index]
+        mutCell(key) { adj in
+            if ovw > 1 { adj.panX += CGFloat(translation.width) / scale / ovw }
+            if ovh > 1 { adj.panY -= CGFloat(translation.height) / scale / ovh }
+        }
+    }
+
+    private func photoName(_ i: Int) -> String {
+        i < photos.count ? photos[i].filename : ""
     }
 
     private func pickPhotos() {
@@ -404,12 +636,115 @@ struct CollageView: View {
         try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
         let dateStr = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")
         let out = dest.appendingPathComponent("Collage-\(dateStr).jpg")
-        status = "Exporting…"
+        status = "Rendering full size…"
+        isRendering = true
+        let hiPhotos = photos
+        let hiRecipe = recipe
         DispatchQueue.global(qos: .userInitiated).async {
-            let ok = Editor.writeImage(preview, to: out)
-            DispatchQueue.main.async {
-                status = ok ? "Saved to \(out.lastPathComponent)" : "Export failed"
+            var hiImages: [NSImage] = []
+            for p in hiPhotos {
+                let r = LibraryStore.shared.loadEdit(for: p.id)
+                if let img = Editor.render(path: p.path, recipe: r, maxPixel: 2600) {
+                    hiImages.append(img)
+                }
             }
+            let result = CollageEngine.render(images: hiImages,
+                                              keys: hiPhotos.map { String($0.id) },
+                                              recipe: hiRecipe,
+                                              canvas: CGSize(width: 4000, height: 4000))
+            var ok = false
+            if let hi = result.image {
+                ok = Editor.writeImage(hi, to: out)
+            }
+            DispatchQueue.main.async {
+                status = ok ? "Saved full-size copy to \(out.lastPathComponent)" : "Export failed"
+                isRendering = false
+            }
+        }
+    }
+}
+
+// MARK: - Collage pieces
+
+/// Invisible per-tile interaction surface on the preview: drag chooses the
+/// crop, pinch zooms, tap selects. A hairline marks the active tile.
+private struct CropCellOverlay: View {
+    let selected: Bool
+    let indexLabel: String
+    let onDrag: (CGSize) -> Void
+    let onMagnify: (CGFloat) -> Void
+    let onEnd: () -> Void
+    let onTap: () -> Void
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .contentShape(Rectangle())
+            .overlay(alignment: .topLeading) {
+                Text(indexLabel)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                    .padding(4)
+                    .opacity(selected ? 1 : 0.6)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(selected ? Color.accentColor : Color.white.opacity(0.18),
+                                  lineWidth: selected ? 2.5 : 1)
+                    .allowsHitTesting(false)
+            }
+            .onTapGesture { onTap() }
+            .gesture(DragGesture(minimumDistance: 3).onChanged { onDrag($0.translation) })
+            .simultaneousGesture(
+                MagnificationGesture()
+                    .onChanged { onMagnify($0) }
+                    .onEnded { _ in onEnd() }
+            )
+    }
+}
+
+/// Miniature with a number badge, used by the per-photo crop strip.
+private struct CellThumb: View {
+    let photo: Photo
+    let selected: Bool
+    let tag: Int
+    let action: () -> Void
+    @State private var image: NSImage?
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: .underPageBackgroundColor))
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.15),
+                                  lineWidth: selected ? 2.5 : 1)
+            }
+            .overlay(alignment: .topLeading) {
+                Text("\(tag)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                    .padding(3)
+            }
+        }
+        .buttonStyle(.plain)
+        .task(id: photo.id) {
+            image = await ThumbnailService.shared.thumbnail(path: photo.path, mtime: photo.mtime, size: 128)
         }
     }
 }

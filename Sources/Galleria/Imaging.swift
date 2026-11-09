@@ -561,8 +561,20 @@ enum CollageEngine {
     /// Renders a Picasa-style collage: Grid (even cells), Picture-in-Picture
     /// (backdrop + small inset), Mosaic (first image large), Freestyle (offset
     /// rows). Supports spacing, borders, captions and Picasa backgrounds.
-    static func render(images: [NSImage], recipe: CollageRecipe, canvas: CGSize = CGSize(width: 2000, height: 2000)) -> NSImage? {
-        guard !images.isEmpty else { return nil }
+    /// Everything the interactive preview needs: bitmap, exact tile geometry
+    /// and per-cell pan overflow (engine units) so drag gestures map 1:1.
+    struct Result {
+        let image: NSImage?
+        let plan: CollagePlan
+        let overflows: [(w: CGFloat, h: CGFloat)]
+        let keys: [String]
+    }
+
+    static func render(images: [NSImage], keys: [String]? = nil, recipe: CollageRecipe, canvas: CGSize = CGSize(width: 2000, height: 2000)) -> Result {
+        let plan = plan(recipe: recipe, count: images.count, canvas: canvas)
+        guard !images.isEmpty else {
+            return Result(image: nil, plan: plan, overflows: [], keys: [])
+        }
         let spacing = CGFloat(recipe.spacing)
         var size = canvas
         switch recipe.canvasAspect {
@@ -598,9 +610,13 @@ enum CollageEngine {
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                    isPlanar: false, colorSpaceName: .deviceRGB,
-                                   bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+                                   bytesPerRow: 0, bitsPerPixel: 0) else {
+            return Result(image: nil, plan: plan, overflows: [], keys: [])
+        }
         rep.size = size
-        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else {
+            return Result(image: nil, plan: plan, overflows: [], keys: [])
+        }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = ctx
         if let bg {
@@ -612,10 +628,18 @@ enum CollageEngine {
         }
 
         let frames = layoutFrames(count: images.count, in: tileArea, spacing: spacing, layout: recipe.layout, recipe: recipe)
+        let cellKeys = keys ?? (0..<images.count).map(String.init)
+        var overflows: [(w: CGFloat, h: CGFloat)] = []
         for (i, img) in images.enumerated() {
-            guard i < frames.count else { break }
+            guard i < frames.count, i < cellKeys.count else { overflows.append((0, 0)); continue }
+            let adj = recipe.cellAdjust(for: cellKeys[i])
+            let dims = rotatedSize(of: img.size, turns: adj.quarterTurns)
+            let geometry = tileGeometry(cell: frames[i], imageSize: dims, adjust: adj)
+            overflows.append((max(0, geometry.drawn.width - frames[i].width),
+                              max(0, geometry.drawn.height - frames[i].height)))
             drawImage(img, in: frames[i], corner: CGFloat(recipe.cornerRadius),
-                      borderWidth: CGFloat(recipe.borderWidth), borderColor: borderColor)
+                      borderWidth: CGFloat(recipe.borderWidth), borderColor: borderColor,
+                      adjust: adj, shadow: recipe.shadow)
         }
 
         if !recipe.caption.isEmpty {
@@ -634,8 +658,10 @@ enum CollageEngine {
                                               withAttributes: attrs)
         }
         NSGraphicsContext.restoreGraphicsState()
-        guard let cg = rep.cgImage else { return nil }
-        return NSImage(cgImage: cg, size: size)
+        guard let cg = rep.cgImage else {
+            return Result(image: nil, plan: plan, overflows: [], keys: [])
+        }
+        return Result(image: NSImage(cgImage: cg, size: size), plan: plan, overflows: overflows, keys: cellKeys)
     }
 
     private static func layoutFrames(count: Int, in canvas: CGRect, spacing: CGFloat, layout: CollageLayout, recipe: CollageRecipe) -> [NSRect] {
@@ -707,16 +733,47 @@ enum CollageEngine {
         }
     }
 
-    private static func drawImage(_ image: NSImage, in rect: NSRect, corner: CGFloat, borderWidth: CGFloat, borderColor: NSColor) {
-        // Aspect-fill crop into the tile.
-        let imgSize = image.size
-        let scale = max(rect.width / max(imgSize.width, 1), rect.height / max(imgSize.height, 1))
-        let drawn = NSSize(width: imgSize.width * scale, height: imgSize.height * scale)
-        let origin = NSPoint(x: rect.midX - drawn.width / 2, y: rect.midY - drawn.height / 2)
+    /// Shared crop math: cover (fill) or contain (fit), then pan across the
+    /// leftover overflow. Returns both the drawn size and its origin so the
+    /// pan state and the renderer can never drift apart.
+    static func tileGeometry(cell: NSRect, imageSize: NSSize, adjust: CollageCellAdjust) -> (drawn: NSSize, origin: NSPoint) {
+        let cover = max(cell.width / max(imageSize.width, 1), cell.height / max(imageSize.height, 1)) * CGFloat(adjust.zoom)
+        let contain = min(cell.width / max(imageSize.width, 1), cell.height / max(imageSize.height, 1)) * CGFloat(adjust.zoom)
+        let scale = adjust.fit ? contain : cover
+        let drawn = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let overflowX = max(0, drawn.width - cell.width)
+        let overflowY = max(0, drawn.height - cell.height)
+        let origin = NSPoint(
+            x: cell.minX + (cell.width - drawn.width) / 2 + (CGFloat(adjust.panX) - 0.5) * overflowX,
+            y: cell.minY + (cell.height - drawn.height) / 2 + (CGFloat(adjust.panY) - 0.5) * overflowY)
+        return (drawn, origin)
+    }
+
+    /// Image size after quarter turns (dimensions swap on odd turns).
+    private static func rotatedSize(of size: NSSize, turns: Int) -> NSSize {
+        let t = ((turns % 4) + 4) % 4
+        return t.isMultiple(of: 2) ? size : NSSize(width: size.height, height: size.width)
+    }
+
+    private static func drawImage(_ image: NSImage, in rect: NSRect, corner: CGFloat, borderWidth: CGFloat, borderColor: NSColor,
+                                  adjust: CollageCellAdjust, shadow: Bool) {
+        let drawnImage = ((adjust.quarterTurns % 4 + 4) % 4) != 0
+            ? rotatedImage(image, turns: adjust.quarterTurns) : image
+        let imgSize = drawnImage.size
+        let geometry = tileGeometry(cell: rect, imageSize: imgSize, adjust: adjust)
+        let drawn = geometry.drawn
+        let origin = geometry.origin
         let clip = NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner)
         NSGraphicsContext.current?.saveGraphicsState()
         clip.addClip()
-        image.draw(in: NSRect(origin: origin, size: drawn), from: NSRect(origin: .zero, size: imgSize),
+        if shadow {
+            // Backing tile: the shadow needs opaque pixels to cast from, and a
+            // fit-mode tile shows this light backing like a mounted print.
+            let shade = NSColor.black.withAlphaComponent(0.001)
+            (adjust.fit ? NSColor(white: 0.94, alpha: 1) : shade).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner).fill()
+        }
+        drawnImage.draw(in: NSRect(origin: origin, size: drawn), from: NSRect(origin: .zero, size: imgSize),
                    operation: .copy, fraction: 1.0)
         NSGraphicsContext.current?.restoreGraphicsState()
         if borderWidth > 0 {
@@ -727,5 +784,54 @@ enum CollageEngine {
         NSColor.black.withAlphaComponent(0.08).setStroke()
         clip.lineWidth = 1
         clip.stroke()
+    }
+
+    /// Quarter-turn copy of `image` (clockwise). Returned image already has the
+    /// swapped dimensions so cover-crop math uses the rotated extents.
+    private static func rotatedImage(_ image: NSImage, turns: Int) -> NSImage {
+        let t = ((turns % 4) + 4) % 4
+        guard t != 0 else { return image }
+        let w = image.size.width, h = image.size.height
+        let outSize: NSSize = t.isMultiple(of: 2)
+            ? NSSize(width: w, height: h)
+            : NSSize(width: h, height: w)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(outSize.width), pixelsHigh: Int(outSize.height),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep), let cg = rep.cgImage else { return image }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        let tf = NSAffineTransform()
+        tf.translateX(by: outSize.width / 2, yBy: outSize.height / 2)
+        // Bottom-left drawing space: -90 degrees per turn reads as clockwise.
+        tf.rotate(byDegrees: CGFloat(t) * -90)
+        tf.translateX(by: -w / 2, yBy: -h / 2)
+        tf.concat()
+        image.draw(in: NSRect(x: -w / 2, y: -h / 2, width: w, height: h), from: .zero,
+                   operation: .copy, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+        return NSImage(cgImage: cg, size: outSize)
+    }
+
+    /// Tile geometry for a given recipe/photo count, used by the interactive
+    /// preview overlay so drags map exactly onto the engine's cells.
+    struct CollagePlan {
+        let canvasSize: CGSize
+        let cells: [NSRect]
+    }
+
+    static func plan(recipe: CollageRecipe, count: Int, canvas: CGSize = CGSize(width: 2000, height: 2000)) -> CollagePlan {
+        var size: CGSize
+        switch recipe.canvasAspect {
+        case "4:3": size = CGSize(width: canvas.width, height: canvas.width * 3 / 4)
+        case "16:9": size = CGSize(width: canvas.width, height: canvas.width * 9 / 16)
+        default: size = canvas
+        }
+        let captionH: CGFloat = recipe.caption.isEmpty ? 0 : 110
+        let tileArea = CGRect(x: 0, y: captionH, width: size.width, height: size.height - captionH)
+        let frames = layoutFrames(count: count, in: tileArea, spacing: CGFloat(recipe.spacing),
+                                  layout: recipe.layout, recipe: recipe)
+        return CollagePlan(canvasSize: size, cells: frames)
     }
 }

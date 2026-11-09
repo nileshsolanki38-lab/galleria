@@ -10,6 +10,9 @@ import AppKit
 /// and is refreshed whenever the window is back to a normal, resizable grid
 /// window.
 private enum ViewerWindowMemory {
+    /// AppKit aborts on setStyleMask during a full-screen visual transition;
+    /// window-level guards consult this flag.
+    static var fullScreenTransitioning = false
     static var frame: NSRect?
     static var styleMask: NSWindow.StyleMask?
     static var titleVisibility: NSWindow.TitleVisibility = .visible
@@ -36,9 +39,14 @@ struct ViewerView: View {
     @State private var offset: CGSize = .zero
     @State private var panStart: CGSize?
     @State private var showEdit = false
-    @State private var hoverFilmstripID: Int64?
+    @State private var hoverFilmstripIndex: Int?
+    /// Scroll-flash: the strip appears while stepping through photos and
+    /// hides itself again a moment after the scrolling (or the pointer) stops.
+    @State private var filmstripFlash = false
+    @State private var filmstripHovering = false
+    @State private var flashHideTask: Task<Void, Never>?
     @AppStorage("viewer.showInfo") private var showInfo = false
-    @AppStorage("viewer.showFilmstrip") private var showFilmstrip = true
+    @AppStorage("viewer.showFilmstrip") private var showFilmstrip = false
     @State private var chromeVisible = false
     /// Folder-scoped browsing list. The viewer only steps through photos in the
     /// same folder as the one that was opened, never the whole library.
@@ -55,11 +63,13 @@ struct ViewerView: View {
     // Viewer preferences and chrome extras.
     @AppStorage("viewer.filmstripThumbSize") private var filmstripThumbSize: Double = 84
     @AppStorage("viewer.slideshowInterval") private var slideshowInterval: Double = 3
-    /// Opening behaviour: immersive full screen by default, or a compact window
-    /// that is exactly the shape of the photo.
-    @AppStorage("viewer.presentation") private var presentation = "fullScreen"
-    @AppStorage("viewer.showTopBar") private var showTopBar = true
-    @AppStorage("viewer.startHidden") private var startHidden = true
+    /// Single tuned presentation: the compact glass window. The old
+    /// "Full screen / Compact" setting kept switching window chrome mid-open
+    /// and caused top-bar glitches, so it is removed — Full Screen stays
+    /// available as a temporary action (F), not a mode.
+    private let presentation = "compact"
+    @AppStorage("viewer.showTopBar") private var showTopBar = false
+    @AppStorage("viewer.startHidden") private var startHidden = false
     @State private var showViewerSettings = false
     @State private var showShortcuts = false
     @State private var showResize = false
@@ -138,7 +148,7 @@ struct ViewerView: View {
     private var filmstripInset: CGFloat { showFilmstrip ? filmstripBarHeight + 26 : 18 }
     /// Height reserved at the compact window's bottom for the filename caption
     /// pill, so it never overlaps the photo or the filmstrip.
-    private var compactCaptionInset: CGFloat { 28 }
+    private var statusBarInset: CGFloat { 24 }
 
     // MARK: - Body
 
@@ -157,42 +167,14 @@ struct ViewerView: View {
 
             photoLayer
 
-            if chromeVisible {
-                chrome
-                    // Pin the floating chrome to the window: the filmstrip's
-                    // scroll content must never make the compact top bar wider
-                    // than the photo.
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .transition(.opacity)
-            } else {
-                // Always-easy way back: a small floating "Show controls" pill
-                // stays on screen even when all chrome is hidden.
-                VStack {
-                    Button {
-                        chromeVisible = true
-                    } label: {
-                        Label("Show controls  ·  Tab", systemImage: "eye")
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                    }
-                    .buttonStyle(.plain)
-                    .glassSurface(cornerRadius: 16)
-                    .help("Show controls (Tab)")
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                    Spacer()
-                }
-                .padding(.top, 14)
+            // Chrome is always mounted; its pieces decide their own visibility.
+            // Nothing floats over the photo: the only way to show or hide the
+            // bars is the right-click menu (or their keyboard shortcuts).
+            chrome
+                // Pin the floating chrome to the window: the filmstrip's
+                // scroll content must never make the compact top bar wider
+                // than the photo.
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-
-            // In a compact window the native title bar can be replaced by three
-            // floating glass buttons in the corner, so the photo is the only thing
-            // on screen.
-            if isCompactWindow && !chromeVisible {
-                compactCornerControls
-                    .transition(.opacity)
-            }
         }
         .background(Color(white: 0.06))
         .background {
@@ -234,10 +216,26 @@ struct ViewerView: View {
             fullScreenActive = true
             zoom = 1
             offset = .zero
+            // Full screen must stay chrome-free: a native title bar or the
+            // grid's unified toolbar flashing over the photo reads as a
+            // "second Galleria menu" overlapping the viewer and the gallery.
+            // These surface toggles are safe once the transition has settled.
+            if let w = targetWindow, w.styleMask.contains(.fullScreen) {
+                w.toolbar?.isVisible = false
+                w.titleVisibility = .hidden
+                w.titlebarAppearsTransparent = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
             fullScreenActive = false
             if isCompactPresentation {
+                // Keep the returning window chrome-free between the exit
+                // animation and the re-compact pass below.
+                if let w = targetWindow {
+                    w.toolbar?.isVisible = false
+                    w.titleVisibility = .hidden
+                    w.titlebarAppearsTransparent = true
+                }
                 // Returning from full screen restores the photo-sized window
                 // (with whichever compact controls are selected).
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -299,21 +297,17 @@ struct ViewerView: View {
             guard isCompactWindow else { return }
             targetWindow?.isMovableByWindowBackground = z <= 1.001
         }
-        // Switching presentation in Viewer settings takes effect immediately.
-        .onChange(of: presentation) { _, newValue in
-            if newValue == "compact" {
-                if isFullScreen {
-                    toggleFullScreen()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-                        applyCompactWindow()
-                    }
-                } else {
-                    applyCompactWindow()
-                }
-            } else {
-                restoreWindowChrome()
-                enterFullScreenOnOpen()
-            }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
+            ViewerWindowMemory.fullScreenTransitioning = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            ViewerWindowMemory.fullScreenTransitioning = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { _ in
+            ViewerWindowMemory.fullScreenTransitioning = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            ViewerWindowMemory.fullScreenTransitioning = false
         }
         // The catalogue can change while the viewer is open (a folder scan after
         // "Open With"). Keep the folder scope fresh and re-anchor on the photo the
@@ -390,15 +384,6 @@ struct ViewerView: View {
             // After leaving full screen, collapse to the photo-sized window.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
                 guard !isFullScreen else { return }
-                presentation = "compact"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    applyCompactWindow()
-                }
-            }
-        } else if !isCompactWindow {
-            // Windowed full-area mode: collapse to photo size first, not straight to grid.
-            presentation = "compact"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 applyCompactWindow()
             }
         } else {
@@ -501,8 +486,8 @@ struct ViewerView: View {
             return EdgeInsets(
                 top: chromeVisible && showTopBar ? 64 : 0,
                 leading: showEdit ? 280 : 0,
-                bottom: (showFilmstrip ? filmstripBarHeight + 26 : 0)
-                    + (chromeVisible ? compactCaptionInset : 0),
+                bottom: ((showFilmstrip || filmstripFlash) ? filmstripBarHeight + 26 : 0)
+                    + statusBarInset,
                 trailing: showInfo ? 280 : 0
             )
         }
@@ -704,11 +689,6 @@ struct ViewerView: View {
         Toggle("Info Panel", isOn: $showInfo)
         Toggle("Adjustments", isOn: $showEdit)
         Divider()
-        Picker("Presentation", selection: $presentation) {
-            Text("Full Screen").tag("fullScreen")
-            Text("Compact Window").tag("compact")
-        }
-        Divider()
         Button(isFullScreen ? "Exit Full Screen" : "Enter Full Screen") { toggleFullScreen() }
         Button("Viewer Settings…") { showViewerSettings = true }
         Divider()
@@ -729,38 +709,30 @@ struct ViewerView: View {
     private var chrome: some View {
         ZStack {
             VStack(spacing: 0) {
-                if showTopBar {
+                if chromeVisible && showTopBar {
                     topBar
                 }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .allowsHitTesting(true)
+            .allowsHitTesting(chromeVisible && showTopBar)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                if showFilmstrip {
+                // The strip is either pinned on (right-click / T) or flashed
+                // for a moment by scrolling through the photos.
+                if showFilmstrip || filmstripFlash {
                     filmstrip
-                } else if !isCompactWindow {
-                    filmstripReveal
+                        .onHover { hovering in
+                            filmstripHovering = hovering
+                            if !hovering, filmstripFlash { flashFilmstrip() }
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                compactStatusBar
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             .allowsHitTesting(true)
-
-            // Compact windows carry their filename as a bottom-left caption
-            // pill above the filmstrip, matching Preview's bottom-edge label.
-            if isCompactWindow && chromeVisible {
-                compactCaption
-                    .allowsHitTesting(false)
-            }
-
-            // Hovering a filmstrip thumbnail floats a large preview of that
-            // photo above the strip (plain text tooltips read as a bug).
-            if chromeVisible, showFilmstrip, let hoverFilmstripID {
-                filmstripHoverPreview(hoverFilmstripID)
-                    .allowsHitTesting(false)
-            }
 
             if showEdit {
                 HStack(alignment: .top, spacing: 0) {
@@ -789,21 +761,12 @@ struct ViewerView: View {
 
     // MARK: - Top bar
 
+    /// ONE bar for every mode. The compact glass bar is always shown; the
+    /// rating, zoom, filmstrip, Finder and slideshow controls only append on
+    /// the right while the viewer is full screen (a photo-sized window is too
+    /// narrow for them). Toggling full screen no longer swaps in a different
+    /// looking bar — the "second menu" is gone.
     private var topBar: some View {
-        Group {
-            if isCompactWindow {
-                compactTopBar
-            } else {
-                fullTopBar
-            }
-        }
-    }
-
-    /// Condensed bar for the actual-size compact window. Icons only: the
-    /// filename and counter live in the bottom caption bar, so no window size
-    /// can squeeze text and buttons into each other. Every control stays
-    /// visible and reachable at any compact size.
-    private var compactTopBar: some View {
         HStack(spacing: 4) {
             // The single glass bar carries the same close/minimize/maximize
             // buttons; no native title bar is stacked above it.
@@ -828,6 +791,35 @@ struct ViewerView: View {
                 .buttonStyle(ViewerIconButtonStyle(active: false))
                 .help(p.favorite ? "Remove from Favorites (.)" : "Add to Favorites (.)")
                 .accessibilityLabel(p.favorite ? "Remove from Favorites" : "Add to Favorites")
+
+                if !isCompactWindow {
+                    starPicker(for: p)
+                }
+            }
+
+            if !isCompactWindow {
+                zoomControls
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.16))
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 3)
+
+                iconButton("rectangle.bottomthird.inset.filled",
+                           help: "Show or hide filmstrip (T)",
+                           active: showFilmstrip) {
+                    showFilmstrip.toggle()
+                    hoverFilmstripIndex = nil
+                }
+                iconButton("folder", help: "Show in Finder") { revealInFinder() }
+                iconButton(slideshow ? "pause.fill" : "play.fill",
+                           help: slideshow ? "Pause slideshow (S)" : "Start slideshow (S)") {
+                    toggleSlideshow()
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.16))
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 3)
             }
 
             Spacer(minLength: 4)
@@ -850,70 +842,70 @@ struct ViewerView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .glassSurface(cornerRadius: 18)
+        .glassSurface(cornerRadius: isCompactWindow ? 18 : 20)
         .padding(.leading, 10)
         .padding(.trailing, 10)
         .padding(.top, 8)
     }
 
-    /// Floating preview for the filmstrip photo the pointer rests on: the photo
-    /// itself at 170 pt plus its filename, anchored bottom-left above the
-    /// strip, so hover previews show images instead of plain text bubbles.
-    @ViewBuilder
-    private func filmstripHoverPreview(_ id: Int64) -> some View {
-        if let entry = photos.first(where: { $0.id == id }) {
-            HStack(alignment: .bottom, spacing: 0) {
-                FilmstripHoverPreview(photo: entry, side: 170)
-                    .padding(.leading, 12)
-                Spacer(minLength: 0)
-            }
-            .padding(.trailing, 12)
-            .padding(.bottom, isCompactWindow
-                ? (showFilmstrip ? filmstripBarHeight + 28 + 26 : compactCaptionInset)
-                : filmstripInset + 2)
-            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+    /// macOS Finder-style status bar for the compact window, pinned to the
+    /// window's bottom edge: filename and position on the left, photo facts
+    /// (dimensions, file size, type) on the right.
+    private var compactStatusBar: some View {
+        HStack(spacing: 10) {
+            Text(photo?.filename ?? "—")
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .accessibilityLabel(photo?.filename ?? "No photo")
+            Text("·")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("\(index + 1) of \(photos.count)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Spacer(minLength: 16)
+            Text(statusDimensionText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Text(statusFileSizeText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Text(statusTypeText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
+        .padding(.horizontal, 12)
+        .frame(height: statusBarInset)
+        .glassSurface(cornerRadius: 0)
     }
 
-    /// Bottom caption for the compact window: filename and photo position on a
-    /// small glass pill, centered and visible at every window size. It sits
-    /// between the photo and the filmstrip; both reserve room for it, so the
-    /// caption can never overlap the image or the strip.
-    private var compactCaption: some View {
-        HStack {
-            HStack(spacing: 5) {
-                Text(photo?.filename ?? "—")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .accessibilityLabel(photo?.filename ?? "No photo")
-                Text("·")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text("\(index + 1) of \(photos.count)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
-            .glassSurface(cornerRadius: 12)
-            .frame(maxWidth: max(120, contentWidth - 24), alignment: .leading)
-            .padding(.leading, 10)
-            Spacer(minLength: 0)
-        }
-        .padding(.trailing, 10)
-        .padding(.bottom, showFilmstrip ? filmstripBarHeight + 28 : 4)
+    private var statusDimensionText: String {
+        guard let p = photo else { return "" }
+        if p.width > 1 && p.height > 1 { return "\(p.width) × \(p.height) px" }
+        guard let size = image?.size,
+              size.width > 1, size.height > 1 else { return "" }
+        let w = Int(size.width.rounded())
+        let h = Int(size.height.rounded())
+        return "\(w) × \(h) px"
     }
 
-    /// Three floating macOS-style window buttons in the top-left corner, shown
-    /// when the compact window has its chrome hidden: close, minimize and
-    /// maximize (full screen).
-    private var compactCornerControls: some View {
-        windowControls
-            .padding(10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    private var statusFileSizeText: String {
+        guard let p = photo else { return "" }
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: p.path))?[.size] as? Int64 ?? 0
+        guard bytes > 0 else { return "" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
+
+    private var statusTypeText: String {
+        photo.flatMap { p in
+            p.path.split(separator: ".").last.map { $0.uppercased() }
+        } ?? ""
+    }
+
 
     /// Close / minimize / maximize, drawn like the macOS traffic lights so the
     /// compact window still behaves like a normal window.
@@ -951,90 +943,6 @@ struct ViewerView: View {
         .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
-    }
-
-    private var fullTopBar: some View {
-        HStack(spacing: 6) {
-            // The window's native traffic lights already provide close/minimize,
-            // so the bar only carries viewer controls (no duplicated buttons).
-            iconButton("chevron.left", help: "Previous photo (←)") { step(-1) }
-                .disabled(index <= 0)
-            iconButton("chevron.right", help: "Next photo (→)") { step(1) }
-                .disabled(index >= photos.count - 1)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(photo?.filename ?? "—")
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(photo?.filename ?? "—")
-                    .accessibilityLabel(photo?.filename ?? "No photo")
-                Text("\(index + 1) of \(photos.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .frame(minWidth: 96, maxWidth: 280, alignment: .leading)
-            .padding(.leading, 4)
-
-            Spacer(minLength: 8)
-
-            if let p = photo {
-                starPicker(for: p)
-                Button {
-                    library.setFavorite([p.id], favorite: !p.favorite)
-                } label: {
-                    Image(systemName: p.favorite ? "heart.fill" : "heart")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(p.favorite ? Color.red : Color.primary)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(ViewerIconButtonStyle(active: false))
-                .help(p.favorite ? "Remove from Favorites (.)" : "Add to Favorites (.)")
-                .accessibilityLabel(p.favorite ? "Remove from Favorites" : "Add to Favorites")
-            }
-
-            zoomControls
-
-            Rectangle()
-                .fill(Color.primary.opacity(0.16))
-                .frame(width: 1, height: 18)
-                .padding(.horizontal, 3)
-
-            iconButton("info.circle", help: "Info panel (I)", active: showInfo) {
-                showInfo.toggle()
-            }
-            iconButton("slider.horizontal.3", help: "Adjustments (E)", active: showEdit) {
-                showEdit.toggle()
-            }
-            iconButton("rectangle.bottomthird.inset.filled",
-                       help: "Show or hide filmstrip (T)",
-                       active: showFilmstrip) {
-                showFilmstrip.toggle()
-                hoverFilmstripID = nil
-            }
-            iconButton("arrow.up.left.and.arrow.down.right", help: "Full screen (F)") {
-                toggleFullScreen()
-            }
-            iconButton("folder", help: "Show in Finder") { revealInFinder() }
-            iconButton(slideshow ? "pause.fill" : "play.fill",
-                       help: slideshow ? "Pause slideshow (S)" : "Start slideshow (S)") {
-                toggleSlideshow()
-            }
-            iconButton("gearshape", help: "Viewer settings", active: showViewerSettings) {
-                showViewerSettings = true
-            }
-            .popover(isPresented: $showViewerSettings, arrowEdge: .bottom) {
-                viewerSettings
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .glassSurface(cornerRadius: 20)
-        .padding(.leading, 16)
-        .padding(.trailing, 16)
-        .padding(.top, 14)
     }
 
     private func iconButton(_ symbol: String,
@@ -1121,17 +1029,6 @@ struct ViewerView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Open viewer in", systemImage: "macwindow")
-                    .font(.callout)
-                Picker("Open viewer in", selection: $presentation) {
-                    Text("Full screen").tag("fullScreen")
-                    Text("Compact window").tag("compact")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
-
             Toggle("Start with controls hidden", isOn: $startHidden)
                 .toggleStyle(.switch)
                 .controlSize(.small)
@@ -1178,12 +1075,26 @@ struct ViewerView: View {
                             // an index-based identity reuses a cell for a different
                             // file when the folder is rescanned, which used to leave
                             // the old image (and its tooltip) under the new filename.
+                            // Dock-style magnification: the hovered thumb grows,
+                            // its neighbours swell a little, like the macOS Dock.
+                            let distance = hoverFilmstripIndex.map { abs($0 - i) } ?? 99
+                            let magnify: CGFloat = distance == 0 ? 1.7
+                                : distance == 1 ? 1.32
+                                : distance == 2 ? 1.12 : 1.0
                             FilmstripCell(photo: p,
                                           selected: p.id == currentPhotoID,
                                           size: filmstripThumb,
                                           onHover: { hovering in
-                                              hoverFilmstripID = hovering ? p.id : nil
+                                              if hovering {
+                                                  hoverFilmstripIndex = i
+                                              } else if hoverFilmstripIndex == i {
+                                                  hoverFilmstripIndex = nil
+                                              }
                                           })
+                                .scaleEffect(magnify, anchor: .bottom)
+                                .zIndex(magnify > 1 ? 10 : 0)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.8),
+                                           value: hoverFilmstripIndex)
                                 .id(p.id)
                                 .onTapGesture { goTo(i) }
                         }
@@ -1213,14 +1124,6 @@ struct ViewerView: View {
                 }
             }
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.16))
-                .frame(width: 1, height: 28)
-
-            iconButton("chevron.down", help: "Hide filmstrip (T)") {
-                showFilmstrip = false
-            }
-            .padding(.trailing, 8)
         }
         .frame(maxWidth: .infinity)
         .glassSurface(cornerRadius: 18)
@@ -1228,21 +1131,6 @@ struct ViewerView: View {
         .padding(.bottom, isCompactWindow ? 8 : 14)
     }
 
-    private var filmstripReveal: some View {
-        Button {
-            showFilmstrip = true
-        } label: {
-            Label("Filmstrip", systemImage: "rectangle.bottomthird.inset.filled")
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .glassSurface(cornerRadius: 16)
-        .padding(.bottom, 14)
-        .help("Show filmstrip (T)")
-    }
 
     // MARK: - Info panel
 
@@ -1320,7 +1208,9 @@ struct ViewerView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Slider(value: value, in: range, step: 0.02)
+            // No `step:` — macOS 26 draws tick marks below the track, and tight
+            // steps fuse into a solid white line (seen under Straighten).
+            Slider(value: value, in: range)
                 .controlSize(.small)
                 .onChange(of: value.wrappedValue) { _, _ in commit() }
         }
@@ -1411,7 +1301,9 @@ struct ViewerView: View {
                     editSlider("Shadows", value: Binding(get: { recipe.shadows }, set: { recipe.shadows = $0 }), range: -1...1)
                     editSlider("Brightness", value: Binding(get: { recipe.brightness }, set: { recipe.brightness = $0 }), range: -1...1)
                     editSlider("Contrast", value: Binding(get: { recipe.contrast }, set: { recipe.contrast = $0 }), range: -1...1)
-                    editSlider("Straighten", value: Binding(get: { recipe.straighten }, set: { recipe.straighten = $0 }), range: -8...8, format: "%+.1f°")
+                    editSlider("Straighten", value: Binding(
+                        get: { recipe.straighten },
+                        set: { recipe.straighten = ($0 * 10).rounded() / 10 }), range: -8...8, format: "%+.1f°")
 
                     Divider()
 
@@ -1687,6 +1579,19 @@ struct ViewerView: View {
         zoom = clamped
     }
 
+    /// Show the filmstrip for a short moment (scrolling through photos), then
+    /// hide it again unless the pointer rests on it or it is pinned on.
+    private func flashFilmstrip() {
+        guard !showFilmstrip else { return }
+        filmstripFlash = true
+        flashHideTask?.cancel()
+        flashHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            guard !Task.isCancelled, !filmstripHovering else { return }
+            filmstripFlash = false
+        }
+    }
+
     private func toggleSlideshow() {
         slideshow.toggle()
         slideshowTask?.cancel()
@@ -1769,6 +1674,19 @@ struct ViewerView: View {
         }
     }
 
+    /// Retry compacting after a full-screen transition settles. One timer runs
+    /// at a time so rapid re-entry cannot stack dozens of toggles.
+    @State private var compactRetryScheduled = false
+    private func scheduleCompactRetry() {
+        guard !compactRetryScheduled else { return }
+        compactRetryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            compactRetryScheduled = false
+            guard isCompactPresentation else { return }
+            applyCompactWindow()
+        }
+    }
+
     /// Size the window to the photo and remove every non-photo pixel from the
     /// window: transparent title bar, no toolbar, optional floating corner
     /// buttons. The result is the photo at its own aspect ratio, edge to edge.
@@ -1776,15 +1694,17 @@ struct ViewerView: View {
         guard isCompactPresentation else { return }
         guard let w = targetWindow else { return }
 
-        // AppKit throws if the style mask is touched while a window is in a
-        // native full-screen state (e.g. the grid was relaunched into full
-        // screen). Leave full screen first, then continue compacting.
+        // AppKit aborts if the style mask is touched while a window is moving
+        // into or out of a native full-screen state (e.g. the grid relaunched
+        // into full screen). Wait until the transition itself is over, then
+        // retry — a single retry chain, never a full-screen re-toggle loop.
+        if ViewerWindowMemory.fullScreenTransitioning {
+            scheduleCompactRetry()
+            return
+        }
         if w.styleMask.contains(.fullScreen) {
             w.toggleFullScreen(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                guard self.isCompactPresentation else { return }
-                self.applyCompactWindow()
-            }
+            scheduleCompactRetry()
             return
         }
 
@@ -1855,9 +1775,9 @@ struct ViewerView: View {
         // fixed chrome strips so the photo itself stays photo-sized inside a
         // window that also contains its filmstrip/top bar.
         let titlebar: CGFloat = 0
-        let chromeH: CGFloat = (chromeVisible && showFilmstrip ? filmstripBarHeight + 26 : 0)
+        let chromeH: CGFloat = (showFilmstrip ? filmstripBarHeight + 26 : 0)
             + (chromeVisible && showTopBar ? 64 : 0)
-            + (chromeVisible ? compactCaptionInset : 0)
+            + statusBarInset
 
         // Shrink the content until the whole frame (photo + chrome strips) fits
         // the visible screen: a tall photo used to push its filmstrip and caption
@@ -1931,6 +1851,10 @@ struct ViewerView: View {
     /// window (frame, title bar, traffic lights, toolbar) back.
     private func restoreWindowChrome() {
         guard let w = targetWindow else { return }
+        if ViewerWindowMemory.fullScreenTransitioning {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { restoreWindowChrome() }
+            return
+        }
         if compactApplied && w.styleMask.contains(.fullScreen) {
             // Leave full screen first, then put the grid's window back the way it was.
             w.toggleFullScreen(nil)
@@ -2079,7 +2003,24 @@ struct ViewerView: View {
             // Over the info panel (or any other scroll view): native scrolling.
             if ctx.overScrollView { return false }
 
-            // Over the photo: scroll zooms toward the pointer, Google Photos style.
+            // Over the photo: an unzoomed vertical scroll steps through the
+            // photos and flashes the filmstrip, Google Photos style. Zoomed or
+            // horizontal scrolls still zoom toward the pointer.
+            if zoom <= 1.001, abs(ctx.deltaY) >= abs(ctx.deltaX) {
+                let now = Date()
+                if now.timeIntervalSince(ScrollZoom.lastFilmstripStep) >= 0.22 {
+                    ScrollZoom.filmstripAccum += ctx.deltaY
+                    if abs(ScrollZoom.filmstripAccum) >= 8 {
+                        let direction: Int = ScrollZoom.filmstripAccum > 0 ? 1 : -1
+                        ScrollZoom.filmstripAccum = 0
+                        ScrollZoom.lastFilmstripStep = now
+                        ScrollZoom.suppressAutoCenterUntil = now.addingTimeInterval(0.7)
+                        step(direction)
+                    }
+                }
+                flashFilmstrip()
+                return true
+            }
             let factor = min(max(pow(1.0025, Double(ctx.deltaY)), 0.75), 1.33)
             zoomAnchored(to: zoom * CGFloat(factor), at: ctx.location)
             return true
@@ -2108,7 +2049,7 @@ struct ViewerView: View {
                 chromeVisible.toggle()
                 return nil
             case 3: toggleFullScreen(); return nil             // f
-            case 17: showFilmstrip.toggle(); hoverFilmstripID = nil; return nil        // t
+            case 17: showFilmstrip.toggle(); hoverFilmstripIndex = nil; return nil        // t
             case 11: showTopBar.toggle(); return nil           // b
             case 34: showInfo.toggle(); return nil             // i
             case 14: showEdit.toggle(); return nil             // e
@@ -2263,37 +2204,6 @@ private struct FilmstripCell: View {
 
 // MARK: - Filmstrip hover preview
 
-private struct FilmstripHoverPreview: View {
-    let photo: Photo
-    let side: CGFloat
-    @State private var image: NSImage?
-
-    var body: some View {
-        VStack(spacing: 5) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9).fill(Color.black.opacity(0.35))
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                }
-            }
-            .frame(width: side, height: side)
-            Text(photo.filename)
-                .font(.caption2.weight(.semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(8)
-        .glassSurface(cornerRadius: 14)
-        .shadow(color: .black.opacity(0.30), radius: 14, y: 5)
-        .task(id: photo.id) {
-            image = await ThumbnailService.shared.thumbnail(
-                path: photo.path, mtime: photo.mtime, size: side * 2
-            )
-        }
-    }
-}
 
 // MARK: - Keyboard shortcuts sheet
 

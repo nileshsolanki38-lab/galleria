@@ -60,6 +60,16 @@ final class LibraryStore: ObservableObject {
     private init() {
         openDatabase()
         migrate()
+        // One-time cleanup: transient system folders could be watched through
+        // "Open With" before the guard existed; drop them and their photos.
+        exec("DELETE FROM photos WHERE folder='/tmp' OR folder LIKE '/tmp/%'"
+           + " OR folder='/private/tmp' OR folder LIKE '/private/tmp/%'"
+           + " OR folder LIKE '/private/var/%' OR folder LIKE '/var/%'"
+           + " OR folder LIKE '/System/%' OR folder LIKE '/usr/%' OR folder LIKE '/etc/%'")
+        exec("DELETE FROM folders WHERE path='/tmp' OR path LIKE '/tmp/%'"
+           + " OR path='/private/tmp' OR path LIKE '/private/tmp/%'"
+           + " OR path LIKE '/private/var/%' OR path LIKE '/var/%'"
+           + " OR path LIKE '/System/%' OR path LIKE '/usr/%' OR path LIKE '/etc/%'")
         configureWatcher()
         loadFolders()
         loadAlbums()
@@ -272,6 +282,26 @@ final class LibraryStore: ObservableObject {
         let folder = url.deletingLastPathComponent()
         guard Self.isReadable(folder: folder) else {
             flash("Can’t read “\(folder.lastPathComponent)” — allow access in System Settings › Privacy & Security › Files and Folders", seconds: 12)
+            return
+        }
+        // Never watch transient system folders: opening a scratch screenshot
+        // from /tmp must not dump thousands of temp files into the library.
+        let p = folder.path
+        let transient = p == "/tmp" || p.hasPrefix("/tmp/")
+            || p == "/private/tmp" || p.hasPrefix("/private/tmp/")
+            || p.hasPrefix("/private/var/") || p.hasPrefix("/var/")
+            || p.hasPrefix("/System/") || p.hasPrefix("/usr/") || p.hasPrefix("/etc/")
+        if transient {
+            queue.async {
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let modified = attrs[.modificationDate] as? Date {
+                    let mtime = modified.timeIntervalSince1970
+                    let date = Imaging.captureDate(path: url.path) ?? mtime
+                    self.upsertPhoto(path: url.path, filename: url.lastPathComponent,
+                                     folder: folder.path, mtime: mtime, date: date)
+                }
+            }
+            DispatchQueue.main.async { self.refresh() }
             return
         }
 
