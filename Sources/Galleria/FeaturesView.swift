@@ -177,7 +177,9 @@ struct CompareView: View {
         }
         .frame(width: 920, height: 560)
         .onAppear {
-            photos = library.photos.filter { photoIDs.contains($0.id) }.prefix(4).map { $0 }
+            var found = library.photos.filter { photoIDs.contains($0.id) }.prefix(4).map { $0 }
+            if found.isEmpty { found = library.photos(withIDs: photoIDs).prefix(4).map { $0 } }
+            photos = Array(found)
             Task {
                 await withTaskGroup(of: (Int64, NSImage?).self) { group in
                     for p in photos {
@@ -606,7 +608,8 @@ struct BatchToolsView: View {
     private func run() {
         busy = true
         status = "Exporting…"
-        let items = library.photos.filter { photoIDs.contains($0.id) }
+        var items = library.photos.filter { photoIDs.contains($0.id) }
+        if items.isEmpty { items = library.photos(withIDs: photoIDs) }
         let opts = options
         DispatchQueue.global(qos: .userInitiated).async {
             try? FileManager.default.createDirectory(at: opts.destination, withIntermediateDirectories: true)

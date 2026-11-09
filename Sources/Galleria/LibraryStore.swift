@@ -67,9 +67,19 @@ final class LibraryStore: ObservableObject {
         refresh()
 
         // Catch anything that changed while the app was closed. This is incremental,
-        // so unchanged files cost nothing more than a directory walk.
+        // so unchanged files cost nothing more than a directory walk. Throttle to
+        // once per hour so a quick relaunch doesn't re-walk every folder (which
+        // looked like "scanning again" on every launch).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.rescanAll()
+            guard let self else { return }
+            let last = UserDefaults.standard.double(forKey: "Galleria.lastFullScan")
+            let now = Date().timeIntervalSince1970
+            if last == 0 || (now - last) > 3600 {
+                UserDefaults.standard.set(now, forKey: "Galleria.lastFullScan")
+                self.rescanAll(announce: false)
+            } else {
+                self.refresh()
+            }
         }
     }
 
@@ -346,7 +356,8 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func rescanAll() {
+    func rescanAll(announce: Bool = true) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "Galleria.lastFullScan")
         queue.async {
             var roots: [String] = []
             var stmt: OpaquePointer?
@@ -364,7 +375,7 @@ final class LibraryStore: ObservableObject {
             // block edits, favourites or the viewer's first paint.
             self.scanQueue.async {
                 for r in roots {
-                    self.scan(folder: URL(fileURLWithPath: r), announce: r == roots.first)
+                    self.scan(folder: URL(fileURLWithPath: r), announce: announce && r == roots.first)
                 }
                 DispatchQueue.main.async {
                     self.isScanning = false
@@ -646,6 +657,23 @@ final class LibraryStore: ObservableObject {
             """, [folder])
             DispatchQueue.main.async { completion(rows) }
         }
+    }
+
+    /// Synchronous lookup of photos by ID, independent of the current grid
+    /// filters. Used by Collage/Compare/Batch views so a selection survives
+    /// even when the grid is filtered or not yet refreshed.
+    func photos(withIDs ids: [Int64]) -> [Photo] {
+        guard !ids.isEmpty else { return [] }
+        var out: [Photo] = []
+        queue.sync {
+            let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+            let sql = """
+            SELECT p.id,p.path,p.filename,p.folder,p.mtime,p.date,p.rating,p.favorite,p.caption,p.tags,p.width,p.height
+            FROM photos p WHERE p.id IN (\(placeholders)) ORDER BY p.date DESC, p.mtime DESC
+            """
+            out = self.query(sql, ids.map { $0 })
+        }
+        return out
     }
 
     private func query(_ sql: String, _ binds: [Any]) -> [Photo] {

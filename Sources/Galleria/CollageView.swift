@@ -236,12 +236,14 @@ struct CollageView: View {
     }
 
     private func resolvePhotos() {
-        if photoIDs.isEmpty { return }
-        photos = library.photos.filter { photoIDs.contains($0.id) }
-        if photos.isEmpty {
-            // Selection may have changed; use the current grid order filter.
-            photos = library.photos.filter { photoIDs.contains($0.id) }
+        guard !photoIDs.isEmpty else { return }
+        var found = library.photos.filter { photoIDs.contains($0.id) }
+        if found.isEmpty {
+            // Grid may be filtered or not yet refreshed — fall back to a
+            // direct DB lookup so the selection is never lost.
+            found = library.photos(withIDs: photoIDs)
         }
+        photos = found
     }
 
     private func renderSoon() {
