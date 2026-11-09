@@ -80,10 +80,11 @@ struct ContentView: View {
             ZStack {
                 NavigationSplitView {
                 sidebar
-                    .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
+                    .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
             } detail: {
                 detail
             }
+            .navigationSplitViewStyle(.balanced)
             .searchable(text: $searchText, placement: .toolbar, prompt: "Search photos, tags, captions")
             .onChange(of: sidebarSelection) { _, _ in applyFilters() }
             .onChange(of: minRating) { _, _ in applyFilters() }

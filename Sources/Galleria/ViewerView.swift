@@ -189,7 +189,7 @@ struct ViewerView: View {
                     .transition(.opacity)
             }
         }
-        .background(Color.black)
+        .background(Color(white: 0.06))
         .background {
             GeometryReader { geo in
                 Color.clear
@@ -204,7 +204,7 @@ struct ViewerView: View {
         .contextMenu { viewerContextMenu }
         // In a compact window the photo is the window: don't let the title bar's
         // safe area introduce even a single pixel of margin.
-        .ignoresSafeArea(isCompactWindow ? .container : [], edges: .all)
+        .ignoresSafeArea((isCompactWindow || fullScreenActive) ? .container : [], edges: .all)
         .animation(.easeInOut(duration: 0.22), value: chromeVisible)
         .animation(.easeInOut(duration: 0.22), value: showFilmstrip)
         .animation(.easeInOut(duration: 0.22), value: showInfo)
@@ -227,6 +227,8 @@ struct ViewerView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
             fullScreenActive = true
+            zoom = 1
+            offset = .zero
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
             fullScreenActive = false
@@ -347,20 +349,21 @@ struct ViewerView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: geo.size.width, height: geo.size.height)
-                        .scaleEffect(1.22)
+                        .scaleEffect(1.45)
+                        .brightness(0.15)
                         .blur(radius: 55, opaque: true)
                         .transition(.opacity)
                 }
 
                 // Keep the photo the hero: darken and add a gentle vignette.
-                Color.black.opacity(0.46)
+                Color.black.opacity(0.22)
                 LinearGradient(
-                    colors: [.black.opacity(0.34), .clear, .black.opacity(0.34)],
+                    colors: [.black.opacity(0.15), .clear, .black.opacity(0.15)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 RadialGradient(
-                    colors: [.clear, .black.opacity(0.30)],
+                    colors: [.clear, .black.opacity(0.15)],
                     center: .center,
                     startRadius: geo.size.width * 0.20,
                     endRadius: geo.size.width * 0.72
@@ -920,13 +923,18 @@ struct ViewerView: View {
 
     private var fullTopBar: some View {
         HStack(spacing: 6) {
-            iconButton("xmark", help: "Close viewer (Esc)") { onClose() }
-            iconButton("minus", help: "Minimize") { targetWindow?.miniaturize(nil) }
+            // In title-bar mode the native traffic lights already provide
+            // close/minimize, so don't duplicate them (avoids overlapping
+            // buttons). In corner mode the compact bar carries its own.
+            if compactControls == "corner" {
+                iconButton("xmark", help: "Close viewer (Esc)") { onClose() }
+                iconButton("minus", help: "Minimize") { targetWindow?.miniaturize(nil) }
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.16))
-                .frame(width: 1, height: 18)
-                .padding(.horizontal, 3)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.16))
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 3)
+            }
 
             iconButton("chevron.left", help: "Previous photo (←)") { step(-1) }
                 .disabled(index <= 0)
@@ -1961,8 +1969,13 @@ struct ViewerView: View {
         let mtime = p.mtime
 
         // Blurred backdrop: a small thumbnail is plenty once it is blurred.
+        // Load it synchronously so the backdrop (and its blur) is present on
+        // the very first frame — otherwise fullscreen shows black bars until
+        // the async thumbnail finishes (or forever if it fails).
         if let cached = ThumbnailService.shared.cachedThumbnail(path: path, mtime: mtime) {
             backdrop = cached
+        } else if let cg = Imaging.baseCGImage(path: path, maxPixel: 420) {
+            backdrop = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         } else {
             backdrop = nil
         }
