@@ -1,0 +1,42 @@
+name: 🐛 Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a bug — Galleria is 100 % offline, so nothing but your description helps fix this.
+  - type: input
+    id: os
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 15.1 (MacBook Air M2)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Galleria version
+      description: Galleria menu → About Galleria
+      placeholder: e.g. 1.0.6 (from the DMG or built from source)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you get instead?
+      placeholder: 1. Added a folder … 2. Opened a photo … Expected … Got …
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: Minimal, numbered steps from launch
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or screen recording (optional)
+      description: Drag images here

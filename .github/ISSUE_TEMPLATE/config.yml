@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & ideas (Discussions)
+    url: https://github.com/nileshsolanki38-lab/galleria/discussions
+    about: Ask anything about Galleria, show what you made with it, or propose bigger changes before filing a formal feature request.
+  - name: 📖 README & Docs
+    url: https://github.com/nileshsolanki38-lab/galleria#readme
+    about: Features, install steps, keyboard shortcuts, privacy notes. If something is documented there, no issue is needed.

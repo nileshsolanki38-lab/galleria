@@ -1,0 +1,23 @@
+name: 💡 Feature request
+description: Suggest an idea or improvement for Galleria
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Galleria makes hard or impossible today?
+      placeholder: When I …, I have to …, which is slow because …
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen. Sketches or Picasa/Google Photos comparisons welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you use today

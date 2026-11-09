@@ -6,6 +6,7 @@
 
 <p align="center">
   <strong>A Picasa-style, folder-based photo library for macOS.</strong><br/>
+  Fast, private, open-source photo manager: instant library, non-destructive editor, collages, faces &amp; places — 100 % on your Mac.<br/>
   Free · Offline · No account · No import step · Nothing ever copied, moved or renamed.
 </p>
 
@@ -14,7 +15,7 @@
     <img src="https://github.com/nileshsolanki38-lab/galleria/actions/workflows/build.yml/badge.svg" alt="Build" />
   </a>
   <img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue" alt="macOS 14+" />
-  <img src="https://img.shields.io/badge/swift-5.9-orange" alt="Swift 5.9" />
+  <img src="https://img.shields.io/badge/swift-6-orange" alt="Swift 6" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
   <img src="https://img.shields.io/github/stars/nileshsolanki38-lab/galleria?style=social" alt="Stars" />
 </p>
@@ -23,13 +24,17 @@
   <a href="https://github.com/nileshsolanki38-lab/galleria/releases/latest">
     <img src="https://img.shields.io/github/v/release/nileshsolanki38-lab/galleria?label=Download&color=brightgreen" alt="Download" />
   </a>
+  <a href="https://github.com/nileshsolanki38-lab/galleria/releases">
+    <img src="https://img.shields.io/github/downloads/nileshsolanki38-lab/galleria/total?label=DMG%20downloads&color=brightgreen" alt="Downloads" />
+  </a>
 </p>
 
 <p align="center">
   <a href="#-quick-start">Quick start</a> ·
   <a href="#-features">Features</a> ·
   <a href="#-screenshots">Screenshots</a> ·
-  <a href="#-contributing">Contributing</a>
+  <a href="#-contributing">Contributing</a> ·
+  <a href="https://github.com/nileshsolanki38-lab/galleria/issues">Report a bug</a>
 </p>
 
 ---
@@ -79,6 +84,9 @@ cd galleria
 ./Scripts/build.sh          # compiles against the macOS 26 SDK
 open dist/Galleria.app
 ```
+
+> `Scripts/build.sh` compiles against the macOS 26 SDK on purpose: the macOS 27 SDK turns SwiftUI's
+> `@State` into a macro whose plugin only ships with full Xcode, which isn't needed for this app.
 
 ---
 
@@ -136,21 +144,6 @@ open dist/Galleria.app
 
 ---
 
-## Install / run
-
-```bash
-# installed here:
-open /Applications/Galleria.app
-
-# rebuild from source (Command Line Tools only, no Xcode needed)
-./Scripts/build.sh
-```
-
-`Scripts/build.sh` compiles against the macOS 26 SDK on purpose: the macOS 27 SDK turns SwiftUI's
-`@State` into a macro whose plugin only ships with full Xcode, which isn't installed on this Mac.
-
----
-
 ## What works today (P0)
 
 ### Library
@@ -199,25 +192,20 @@ open /Applications/Galleria.app
 - **Folder-scoped** — opening a photo browses only the photos in that photo's folder (its whole
   folder is scanned first). The filmstrip, arrow keys and scroll wheel never leave that folder, even
   when the grid is filtered by search, rating or Favorites. The counter reads e.g. “9 of 10”.
-- **Two presentations, chosen in Viewer settings:**
-  - **Full screen** (default) — opens with the controls hidden. The photo sits on a blurred, darkened
-    copy of itself with a floating glass top bar and filmstrip over it. Press `Tab` (or `H`) to reveal
-    the chrome.
-  - **Compact window** — the window is sized to the photo itself: a square photo gets a square window,
-    a portrait photo a portrait window, with **no blurred backdrop, letterboxing, padding or margins**.
-    The photo is always shown at its own aspect ratio, so it can never be stretched or squeezed. Only
-    three floating macOS-style corner buttons (close, info, full screen) are shown; `Tab` reveals a
-    compact top bar and filmstrip, and `B` toggles the bar on its own.
-- **Responsive compact top bar** — the bar measures the window and keeps only the controls that fit:
-  close / filename / full screen / settings on a narrow photo, with previous-next, info, favorite and
-  adjustments appearing as the photo gets wider.
-- **Compact controls** — choose **Corner buttons** (hidden traffic lights, photo edge-to-edge) or
-  **Title bar** (native traffic lights and a minimal title bar) in Viewer settings. The compact window
-  is locked to the photo's shape, so it cannot be resized into a stretched or letterboxed view.
+- **Photo-shaped compact window** — a square photo gets a square window, a portrait photo a portrait
+  window, with **no blurred backdrop, letterboxing, padding or margins**. The photo is always shown at
+  its own aspect ratio, so it can never be stretched or squeezed. **Full Screen is an action (`F` or
+  the green button), not a mode** — no setting, and toggling it never flashes a second menu.
+- **One adaptive glass top bar** — the same bar in every mode: close/min/max, previous–next, favorite
+  and the gear; rating, zoom, filmstrip, Finder and slideshow controls join on the right when the
+  window is wide enough (icons only on a narrow photo).
 - Arrow keys `←` `→` move through the folder, `Esc` closes, `Space` toggles 2.5× zoom, `F` full screen.
 - **Click outside the photo** collapses back to the grid; **double-click the photo** goes full screen.
-- `Tab` / `H` hides or shows all chrome for a completely clean view. `T` toggles the filmstrip, `B` the
-  top bar, `I` the info panel, `E` adjustments.
+- `Tab` / `H` hides or shows all chrome for a completely clean view. Right-click anywhere opens the
+  full chrome menu — that's the one place to show or hide everything. The filmstrip is **off by
+  default**: scrolling through photos reveals it briefly and it hides itself again; `T` pins or
+  unpins it. `B` toggles the top bar, `I` the info panel, `E` adjustments, and a hover on a filmstrip
+  thumbnail magnifies it Dock-style.
 - `+` / `−` zoom in and out, `0` or `1` fit to window. The zoom button shows the current percentage.
 - **Scroll over the photo zooms toward the pointer**, exactly like Google Photos: the point under
   the cursor stays put while the image grows or shrinks. Pinch and **⌘-scroll** also zoom.
@@ -225,12 +213,9 @@ open /Applications/Galleria.app
   photo), while a horizontal swipe still scrolls the strip itself. Scrolling over the info panel keeps
   its native behaviour.
 - Drag to pan when zoomed in. Zoom never goes below "fit", so the photo can't shrink into a dot.
-- **Filmstrip** at the bottom, auto-scrolls to keep the current photo centred. Its thumbnail size is
-  adjustable from **Viewer settings** (48–140 pt, default 84) and the strip can be hidden entirely.
-- **Viewer settings** (gear button) — filmstrip size slider, show/hide filmstrip, show/hide top bar,
-  **Open viewer in** (Full screen / Compact window), **Compact controls** (Corner buttons / Title bar),
-  “Start with controls hidden”, slideshow interval (2/3/5/10 s), and a shortcut to the full
-  keyboard-shortcuts sheet. Switching presentation takes effect immediately.
+- **Viewer settings** (gear button) — filmstrip size slider (48–140 pt), show/hide filmstrip,
+  show/hide top bar, "Start with controls hidden", slideshow interval (2/3/5/10 s), and a shortcut
+  to the full keyboard-shortcuts sheet. Every choice is remembered.
 - **Slideshow** (`S` or the play button) advances automatically, loops at the end, and pauses on a
   second press. The interval comes from Viewer settings.
 - **Info panel** — dimensions, file size, camera, lens, ISO, shutter, aperture, focal length,
@@ -289,14 +274,16 @@ open /Applications/Galleria.app
 - **Red-eye assist (D10):** viewer Adjustments → Red-eye assist. Detects eyes via Vision landmarks; applies gentle eye-friendly colour (true inpainting out of scope).
 - **Batch (E1):** toolbar `Batch` or right-click → max dimension (keep / 1024 / 2048 / 4096), JPEG/PNG/HEIC, rename pattern `{name} {date} {index}`.
 
-### Window chrome — native + transparent, always easy to get back
-- Compact viewer **defaults to the native title bar** so minimise / maximise (zoom) / close are the real macOS traffic lights that follow light/dark theme (Viewer settings → *Compact controls: Title bar*). Corner-glass buttons remain available.
-- When all chrome is hidden, a small floating **“Show controls · Tab”** pill stays on screen — click it or press `Tab`/`H` to bring everything back. Right-click anywhere also opens the full *Show All Controls* menu, so you can never get stuck.
-- Filmstrip, top bar, info and adjustments each toggle independently (`T` / `B` / `I` / `E`) with their own reveal pill (`Filmstrip`).
+### Window chrome — native + transparent, one way in, one way out
+- **Right-click anywhere in the viewer** is the single, consistent way to show or hide the top bar,
+  filmstrip and other chrome (plus the `T` / `B` / `Tab` / `F` shortcuts). Nothing ever floats over
+  your photo.
+- Filmstrip, top bar, info and adjustments each toggle independently (`T` / `B` / `I` / `E`).
+- A Finder-style status bar always shows `filename · N of M · W × H px · size · TYPE`.
 
-### Default viewer
-- qView uninstalled (moved to Trash). **Galleria is now the system default** for JPEG / PNG / GIF / BMP / SVG / WebP / AVIF / RAW / `public.image` (`LSHandlerRank: Default` + LaunchServices set). Preview remains available via *Open With* if you prefer it.
-- **Apple-protected types:** macOS marks HEIC and TIFF as Apple-default (`LSIsAppleDefaultForType`) and protects their double-click handler, so those still open in Preview by default. To make Galleria the default for HEIC/TIFF: right-click any `.heic`/`.tiff` file → **Get Info** → *Open with: Galleria* → **Change All…**. This is a one-time, per-type setting stored in your LaunchServices database; Galleria cannot override it programmatically.
+### Default image viewer (optional, one-time)
+- Make Galleria your system default for JPEG / PNG / GIF / BMP / SVG / WebP / AVIF / RAW (`public.image`): it ships with `LSHandlerRank: Default` and registers with LaunchServices. Preview remains available via *Open With* if you prefer it.
+- **Apple-protected types:** macOS marks HEIC and TIFF as Apple-default and protects their double-click handler, so those still open in Preview by default. To make Galleria the default for HEIC/TIFF: right-click any `.heic`/`.tiff` file → **Get Info** → *Open with: Galleria* → **Change All…**. This is a one-time, per-type setting; no app can override it programmatically.
 
 ### Still not built
 | Feature | Status |
@@ -318,7 +305,7 @@ Sources/Galleria/
   Imaging.swift       ThumbnailService, EXIF/capture-date reader, Core Image editor + exporter + CollageEngine
   ContentView.swift   sidebar, timeline grid, scrubber, toolbar, PhotoCell, Open With handling
   ViewerView.swift    viewer, pointer-anchored zoom, window-anchored filmstrip/top bar, settings, slideshow, info/edit panels,
-                      crop overlay, shortcuts sheet, key + scroll monitors, always-visible “Show controls” pill, two-stage collapse
+                      crop overlay, shortcuts sheet, key + scroll monitors, right-click chrome menu, Dock-style filmstrip hover
   CollageView.swift   Picasa-style collage maker (Grid/PIP/Mosaic/Freestyle, borders, caption, shuffle, live preview, export)
   FeaturesView.swift  Compare, Faces (Vision), Places (MapKit + EXIF GPS), Smart Albums, Duplicate Finder, Batch tools, GeoHelper
   PreviewTools.swift  Preview-style: ResizeSheet, Instant Alpha (Vision foreground mask), ResizeHelper, MarkupColors helpers
@@ -331,18 +318,16 @@ dist/Galleria.app     build output
 
 ## Notes
 
-- The app is ad-hoc signed (no Developer ID). Gatekeeper assessments are disabled on this Mac,
-  so it launches normally. If you ever move it to another Mac you'll need to right-click → Open once.
-- **Rebuilding changes the app's code identity**, so macOS may ask again for folder access after each
-  build. That's a macOS rule for unsigned apps, not a Galleria bug.
+- The app is ad-hoc signed (no paid Developer ID certificate). Macs Gatekeeper hasn't seen before ask
+  once: right-click → **Open**. The DMG ships with a `.sha256` checksum to verify.
+- **Rebuilding from source changes the app's code identity**, so macOS may ask again for folder access
+  after each build. That's a macOS rule for unsigned apps, not a Galleria bug.
 - Library database and thumbnails are plain files — deleting `~/Library/Caches/Galleria` just
   forces thumbnails to regenerate. **Clear Thumbnail Cache** in the Actions menu does the same in-app.
 - `Galleria --scan <folder>` on launch indexes a folder headlessly, handy for scripting.
 - The app was previously called PhotoCraft; its database and thumbnail cache were migrated to the
   `Galleria` folders, so nothing was re-indexed from scratch.
 - **Default image app** — Galleria (`com.nileshsolanki.galleria`) is the system handler for image files since 1.0.1 (qView removed, Preview available via *Open With*).
-
-## QA summary
 
 ## QA summary
 
@@ -387,3 +372,19 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for build inst
 
 - Built with Swift + SwiftUI, Core Image, Vision, MapKit, SQLite.
 - Inspired by Google Picasa and macOS Preview.
+
+## ⭐ Support
+
+- ⭐ **Star the repo** — the single biggest thing that helps others discover Galleria.
+- 📣 **Share it** — one sentence + a link on X/Twitter, Reddit (r/macapps, r/opensource) or Hacker News does more than you'd think.
+- 🐛 **Report bugs, request features** in [Issues](https://github.com/nileshsolanki38-lab/galleria/issues) — every report makes the next release better.
+
+<p align="center">
+  <a href="https://star-history.com/#nileshsolanki38-lab/galleria&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nileshsolanki38-lab/galleria&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=nileshsolanki38-lab/galleria&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=nileshsolanki38-lab/galleria&type=Date" width="640" />
+    </picture>
+  </a>
+</p>
