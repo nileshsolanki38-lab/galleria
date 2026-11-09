@@ -6,6 +6,13 @@ you point it at folders and it indexes what's already there. Nothing is ever cop
 Built with Swift + SwiftUI, ImageIO for decoding, Core Image for edits and SQLite for the catalogue.
 No third-party dependencies.
 
+## Screenshots
+
+| Photo library (grid) | Viewer | Collage maker |
+|---|---|---|
+| ![Grid](screenshots/grid.png) | ![Viewer](screenshots/viewer.png) | ![Collage](screenshots/collage.png) |
+
+
 ---
 
 ## Install / run
