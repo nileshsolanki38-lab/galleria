@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Galleria.app
+        run: ./Scripts/build.sh
+
+      - name: Verify bundle
+        run: |
+          test -x dist/Galleria.app/Contents/MacOS/Galleria
+          plutil -lint dist/Galleria.app/Contents/Info.plist
+          echo "Build OK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Galleria-macos
+          path: dist/Galleria.app
+          retention-days: 14
