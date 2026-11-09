@@ -92,15 +92,17 @@ open dist/Galleria.app
 - ⌨️ Full keyboard navigation (← → ↑ ↓, Return, Esc, Space, ⌘E, …).
 
 ### 🖼 Viewer
-- 🪟 Full-screen or compact (photo-shaped) window, native macOS traffic lights.
+- 🪟 Compact photo-shaped glass window; Full Screen is an action (F or the green button) — no mode setting, no second menu flash.
 - 🔎 Pointer-anchored zoom, pan, slideshow, info panel (EXIF/GPS).
-- 🎞 Window-anchored filmstrip, auto-centres on the current photo.
+- 🎞 Window-anchored filmstrip (off by default): scroll through photos to reveal it briefly, hover a thumbnail for Dock-style magnification.
 - ✏️ Non-destructive edits: Exposure, Fill light, Highlights, Shadows, Brightness, Contrast, Straighten, Warmth, Saturation, Sharpen, Vignette, 8 filters, crop, rotate, flip, markup, resize, instant alpha, red-eye assist.
 - 📋 Copy/paste adjustments between photos.
 
 ### 🎨 Collage maker
 - Grid / Picture-in-Picture / Mosaic / Freestyle layouts.
 - Spacing, corner radius, borders, caption band, shuffle, transparent background, Square/4:3/16:9 canvas.
+- Pick a folder or hand-select photos; per-photo crop (fill tile / fit whole photo, zoom, pan drag, quarter turns).
+- Tile drop shadows and hi-res export on a 4000 px canvas. Originals are never modified.
 
 ### 🧠 Pro tools
 - 🔍 **Compare** 2–4 photos side by side.
@@ -112,8 +114,8 @@ open dist/Galleria.app
 
 ### 🖥 Window chrome
 - Native minimise / maximise / close, transparent glass panels.
-- "Show controls · Tab" pill so you can never get stuck.
-- Filmstrip, top bar, info and adjustments toggle independently.
+- Finder-style status bar: filename · counter · dimensions · file size · type.
+- Right-click — or the T/B/Tab/F shortcuts — to show or hide the top bar, filmstrip and other chrome; nothing floats over your photo.
 
 ---
 
