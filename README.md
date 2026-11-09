@@ -98,12 +98,19 @@ open dist/Galleria.app
 ---
 
 
-## Screenshots
+## 📸 Screenshots
 
-| Photo library (grid) | Viewer | Collage maker |
-|---|---|---|
-| ![Grid](screenshots/grid.png) | ![Viewer](screenshots/viewer.png) | ![Collage](screenshots/collage.png) |
+### Photo library (grid)
+![Photo library grid](screenshots/grid.png)
 
+### Viewer with edits
+![Viewer with adjustments](screenshots/viewer.png)
+
+### Adjustments panel
+![Adjustments panel](screenshots/adjust.png)
+
+### Collage maker
+![Collage maker](screenshots/collage.png)
 
 ---
 
