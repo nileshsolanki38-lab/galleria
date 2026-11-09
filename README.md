@@ -1,10 +1,102 @@
-# Galleria
+<p align="center">
+  <img src="docs/images/app-icon-256.png" alt="Galleria icon" width="128" />
+</p>
 
-A Picasa-style, folder-based photo library for macOS. Free, offline, no account, no import step —
-you point it at folders and it indexes what's already there. Nothing is ever copied, moved or renamed.
+<h1 align="center">Galleria</h1>
 
-Built with Swift + SwiftUI, ImageIO for decoding, Core Image for edits and SQLite for the catalogue.
-No third-party dependencies.
+<p align="center">
+  <strong>A Picasa-style, folder-based photo library for macOS.</strong><br/>
+  Free · Offline · No account · No import step · Nothing ever copied, moved or renamed.
+</p>
+
+<p align="center">
+  <a href="https://github.com/nileshsolanki38-lab/galleria/actions/workflows/build.yml">
+    <img src="https://github.com/nileshsolanki38-lab/galleria/actions/workflows/build.yml/badge.svg" alt="Build" />
+  </a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue" alt="macOS 14+" />
+  <img src="https://img.shields.io/badge/swift-5.9-orange" alt="Swift 5.9" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
+  <img src="https://img.shields.io/github/stars/nileshsolanki38-lab/galleria?style=social" alt="Stars" />
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-screenshots">Screenshots</a> ·
+  <a href="#-contributing">Contributing</a>
+</p>
+
+---
+
+## ✨ Why Galleria?
+
+- 📂 **Folder-based, not import-based** — point it at `~/Pictures` and it indexes what's already there.
+- 🔒 **100 % offline & local** — no account, no cloud, no telemetry. Your photos never leave your Mac.
+- 🖼 **Non-destructive** — edits are JSON recipes in SQLite; the original file is never touched.
+- 🪶 **Lightweight** — Swift + SwiftUI + SQLite, zero third-party dependencies.
+- 🆓 **Free & open source** (MIT).
+
+---
+
+## 🚀 Quick start
+
+```bash
+# 1. Download the latest build
+#    (or build from source — see below)
+
+# 2. Open it
+open /Applications/Galleria.app
+
+# 3. Add a folder
+#    ⇧⌘O  →  pick ~/Pictures (or any folder)
+```
+
+### Build from source (no Xcode needed)
+
+```bash
+git clone https://github.com/nileshsolanki38-lab/galleria.git
+cd galleria
+./Scripts/build.sh          # compiles against the macOS 26 SDK
+open dist/Galleria.app
+```
+
+---
+
+## 🎯 Features
+
+### 📚 Library
+- 🗂 Folder-based indexing with FSEvents watching — new photos appear within seconds.
+- 🔍 Search by filename, tags, captions; rating filter; thumbnail size slider.
+- ⭐ Favorites, 0–5★ ratings, albums, smart albums.
+- 🧭 Timeline scrubber grouped by month/year (uses EXIF capture date).
+- ⌨️ Full keyboard navigation (← → ↑ ↓, Return, Esc, Space, ⌘E, …).
+
+### 🖼 Viewer
+- 🪟 Full-screen or compact (photo-shaped) window, native macOS traffic lights.
+- 🔎 Pointer-anchored zoom, pan, slideshow, info panel (EXIF/GPS).
+- 🎞 Window-anchored filmstrip, auto-centres on the current photo.
+- ✏️ Non-destructive edits: Exposure, Fill light, Highlights, Shadows, Brightness, Contrast, Straighten, Warmth, Saturation, Sharpen, Vignette, 8 filters, crop, rotate, flip, markup, resize, instant alpha, red-eye assist.
+- 📋 Copy/paste adjustments between photos.
+
+### 🎨 Collage maker
+- Grid / Picture-in-Picture / Mosaic / Freestyle layouts.
+- Spacing, corner radius, borders, caption band, shuffle, transparent background, Square/4:3/16:9 canvas.
+
+### 🧠 Pro tools
+- 🔍 **Compare** 2–4 photos side by side.
+- 👤 **People** — on-device Vision face detection, per-photo counts.
+- 🗺 **Places** — MapKit pins from EXIF GPS.
+- 📁 **Smart Albums** — saved searches.
+- 👯 **Duplicate Finder** — perceptual hashing.
+- 📦 **Batch** — resize / convert / rename in one pass.
+
+### 🖥 Window chrome
+- Native minimise / maximise / close, transparent glass panels.
+- "Show controls · Tab" pill so you can never get stuck.
+- Filmstrip, top bar, info and adjustments toggle independently.
+
+---
+
 
 ## Screenshots
 
@@ -247,3 +339,22 @@ to a single Favorites result still showed “7 of 10”, and the filmstrip/scrol
 `testimages`. The bundled `AppIcon.icns` is present and 1024 px;
 every pixel inside its rounded tile is opaque with no flat background border. Viewer chrome, filmstrip
 and filename captions were checked via the accessibility tree.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions and guidelines.
+
+- 🐛 Found a bug? [Open an issue](https://github.com/nileshsolanki38-lab/galleria/issues).
+- 💡 Have an idea? [Start a discussion](https://github.com/nileshsolanki38-lab/galleria/discussions).
+- ⭐ If you like Galleria, **star the repo** — it helps others discover it.
+
+## 📜 License
+
+[MIT](LICENSE) © 2026 Nilesh Solanki. Free to use, modify and distribute.
+
+## 🙏 Acknowledgements
+
+- Built with Swift + SwiftUI, Core Image, Vision, MapKit, SQLite.
+- Inspired by Google Picasa and macOS Preview.
