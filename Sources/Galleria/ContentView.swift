@@ -3,6 +3,43 @@ import AppKit
 import Combine
 import UniformTypeIdentifiers
 
+/// Groups the long notification-handler chain so the SwiftUI type-checker
+/// doesn't have to chew through a single 20-deep modifier stack (which
+/// fails on older compilers, e.g. the GitHub macOS runners).
+struct ContentViewNotifications: ViewModifier {
+    @Binding var showShortcuts: Bool
+    @Binding var showCompare: Bool
+    @Binding var showFaces: Bool
+    @Binding var showPlaces: Bool
+    @Binding var showDuplicates: Bool
+    @Binding var showBatch: Bool
+    @Binding var viewerIndex: Int?
+    let addFolder: () -> Void
+    let exportSelected: () -> Void
+    let consumeOpenQueue: () -> Void
+    let choosePhoto: () -> Void
+    let openCollageFromViewer: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaAddFolder)) { _ in addFolder() }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaExport)) { _ in exportSelected() }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaOpenPhoto)) { _ in consumeOpenQueue() }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaOpenPhotoPicker)) { _ in choosePhoto() }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaShowShortcuts)) { _ in
+                if viewerIndex == nil { showShortcuts = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaMakeCollage)) { _ in
+                openCollageFromViewer()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaCompare)) { _ in showCompare = true }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaFaces)) { _ in showFaces = true }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaPlaces)) { _ in showPlaces = true }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaDuplicates)) { _ in showDuplicates = true }
+            .onReceive(NotificationCenter.default.publisher(for: .galleriaBatch)) { _ in showBatch = true }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var library: LibraryStore
 
@@ -72,21 +109,20 @@ struct ContentView: View {
                 guard url.isFileURL else { return }
                 openExternal(url)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaAddFolder)) { _ in addFolder() }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaExport)) { _ in exportSelected() }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaOpenPhoto)) { _ in consumeOpenQueue() }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaOpenPhotoPicker)) { _ in choosePhoto() }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaShowShortcuts)) { _ in
-                if viewerIndex == nil { showShortcuts = true }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaMakeCollage)) { _ in
-                openCollageFromViewer()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaCompare)) { _ in showCompare = true }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaFaces)) { _ in showFaces = true }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaPlaces)) { _ in showPlaces = true }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaDuplicates)) { _ in showDuplicates = true }
-            .onReceive(NotificationCenter.default.publisher(for: .galleriaBatch)) { _ in showBatch = true }
+            .modifier(ContentViewNotifications(
+                showShortcuts: $showShortcuts,
+                showCompare: $showCompare,
+                showFaces: $showFaces,
+                showPlaces: $showPlaces,
+                showDuplicates: $showDuplicates,
+                showBatch: $showBatch,
+                viewerIndex: $viewerIndex,
+                addFolder: addFolder,
+                exportSelected: exportSelected,
+                consumeOpenQueue: consumeOpenQueue,
+                choosePhoto: choosePhoto,
+                openCollageFromViewer: openCollageFromViewer
+            ))
             .background {
                 // Arrow keys move the grid selection and Return opens it. SwiftUI
                 // keyboard shortcuts do not reliably receive these keys (the
