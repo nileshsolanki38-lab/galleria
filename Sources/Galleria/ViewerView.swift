@@ -40,11 +40,7 @@ struct ViewerView: View {
     @State private var panStart: CGSize?
     @State private var showEdit = false
     @State private var hoverFilmstripIndex: Int?
-    /// Scroll-flash: the strip appears while stepping through photos and
-    /// hides itself again a moment after the scrolling (or the pointer) stops.
-    @State private var filmstripFlash = false
     @State private var filmstripHovering = false
-    @State private var flashHideTask: Task<Void, Never>?
     @AppStorage("viewer.showInfo") private var showInfo = false
     @AppStorage("viewer.showFilmstrip") private var showFilmstrip = false
     @State private var chromeVisible = false
@@ -486,7 +482,7 @@ struct ViewerView: View {
             return EdgeInsets(
                 top: chromeVisible && showTopBar ? 64 : 0,
                 leading: showEdit ? 280 : 0,
-                bottom: ((showFilmstrip || filmstripFlash) ? filmstripBarHeight + 26 : 0)
+                bottom: (showFilmstrip ? filmstripBarHeight + 26 : 0)
                     + statusBarInset,
                 trailing: showInfo ? 280 : 0
             )
@@ -719,13 +715,11 @@ struct ViewerView: View {
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                // The strip is either pinned on (right-click / T) or flashed
-                // for a moment by scrolling through the photos.
-                if showFilmstrip || filmstripFlash {
+                // The strip is pinned on via the right-click menu (or T).
+                if showFilmstrip {
                     filmstrip
                         .onHover { hovering in
                             filmstripHovering = hovering
-                            if !hovering, filmstripFlash { flashFilmstrip() }
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -1103,6 +1097,9 @@ struct ViewerView: View {
                     .padding(.vertical, 8)
                 }
                 .frame(height: filmstripBarHeight)
+                // Dock magnification grows the hovered thumb above the strip:
+                // without this the scroll view clips it and nothing is visible.
+                .scrollClipDisabled(true)
                 .onChange(of: currentPhotoID) { _, newValue in
                     // Mouse-wheel stepping must not shift the strip under the
                     // pointer; keep its position and just move the highlight.
@@ -1579,19 +1576,6 @@ struct ViewerView: View {
         zoom = clamped
     }
 
-    /// Show the filmstrip for a short moment (scrolling through photos), then
-    /// hide it again unless the pointer rests on it or it is pinned on.
-    private func flashFilmstrip() {
-        guard !showFilmstrip else { return }
-        filmstripFlash = true
-        flashHideTask?.cancel()
-        flashHideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_400_000_000)
-            guard !Task.isCancelled, !filmstripHovering else { return }
-            filmstripFlash = false
-        }
-    }
-
     private func toggleSlideshow() {
         slideshow.toggle()
         slideshowTask?.cancel()
@@ -1650,7 +1634,10 @@ struct ViewerView: View {
             savedToolbarVisible = ViewerWindowMemory.toolbarVisible
             w.toolbar?.isVisible = false
         }
-        if isCompactPresentation {
+        // A long photo (at least twice as tall as wide — scrolling screenshots,
+        // tall panoramas) never fits a compact photo-shaped window without
+        // becoming an unreadable sliver, so it opens full screen by default.
+        if isCompactPresentation && !photoIsLong {
             // Let the viewer's insertion animation settle before resizing.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 applyCompactWindow()
@@ -1660,13 +1647,22 @@ struct ViewerView: View {
         }
     }
 
-    /// The viewer is immersive by default: open straight into full screen.
-    /// A single request is enough; retrying during the full-screen animation
-    /// can wedge AppKit's transition.
+    /// "Long" photo: at least twice as tall as wide. These open full screen
+    /// instead of the compact photo-shaped window.
+    private var photoIsLong: Bool {
+        let p = photo ?? photo(at: index)
+        guard let p, p.width > 0, p.height > 0 else { return false }
+        return CGFloat(p.height) / CGFloat(p.width) >= 2.0
+    }
+
+    /// Full screen on open: used when the viewer opens in the immersive
+    /// presentation, or when a long photo needs the whole screen (it never
+    /// fits a compact photo-shaped window). A single request is enough;
+    /// retrying during the full-screen animation can wedge AppKit's transition.
     private func enterFullScreenOnOpen() {
-        guard !isCompactPresentation, !isFullScreen else { return }
+        guard !isFullScreen else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            guard !isCompactPresentation, !isFullScreen else { return }
+            guard !isFullScreen else { return }
             guard let w = targetWindow else { return }
             NSApp.activate(ignoringOtherApps: true)
             w.makeKeyAndOrderFront(nil)
@@ -2003,24 +1999,8 @@ struct ViewerView: View {
             // Over the info panel (or any other scroll view): native scrolling.
             if ctx.overScrollView { return false }
 
-            // Over the photo: an unzoomed vertical scroll steps through the
-            // photos and flashes the filmstrip, Google Photos style. Zoomed or
-            // horizontal scrolls still zoom toward the pointer.
-            if zoom <= 1.001, abs(ctx.deltaY) >= abs(ctx.deltaX) {
-                let now = Date()
-                if now.timeIntervalSince(ScrollZoom.lastFilmstripStep) >= 0.22 {
-                    ScrollZoom.filmstripAccum += ctx.deltaY
-                    if abs(ScrollZoom.filmstripAccum) >= 8 {
-                        let direction: Int = ScrollZoom.filmstripAccum > 0 ? 1 : -1
-                        ScrollZoom.filmstripAccum = 0
-                        ScrollZoom.lastFilmstripStep = now
-                        ScrollZoom.suppressAutoCenterUntil = now.addingTimeInterval(0.7)
-                        step(direction)
-                    }
-                }
-                flashFilmstrip()
-                return true
-            }
+            // Over the photo: scrolling zooms toward the pointer, fit or zoomed
+            // alike. Arrows (and the filmstrip wheel) step through photos.
             let factor = min(max(pow(1.0025, Double(ctx.deltaY)), 0.75), 1.33)
             zoomAnchored(to: zoom * CGFloat(factor), at: ctx.location)
             return true
