@@ -39,8 +39,12 @@ struct ViewerView: View {
     @State private var offset: CGSize = .zero
     @State private var panStart: CGSize?
     @State private var showEdit = false
-    @State private var hoverFilmstripIndex: Int?
-    @State private var filmstripHovering = false
+    /// Hi-res rendering: the first paint decodes at 3000px for a fast open;
+    /// zooming in triggers ONE sharper decode per photo (capped for memory)
+    /// so text stays readable. Photos ≤ 10000px on their long side get their
+    /// true pixels.
+    @State private var hiResRendered = false
+    @State private var hiResTask: Task<Void, Never>?
     @AppStorage("viewer.showInfo") private var showInfo = false
     @AppStorage("viewer.showFilmstrip") private var showFilmstrip = false
     @State private var chromeVisible = false
@@ -292,6 +296,15 @@ struct ViewerView: View {
             // once zoomed, drag pans the photo instead.
             guard isCompactWindow else { return }
             targetWindow?.isMovableByWindowBackground = z <= 1.001
+        }
+        .onChange(of: zoom) { _, z in
+            // Zooming into a big photo needs more than the fast 3000px decode;
+            // one debounced sharper render keeps text readable.
+            if z > 1.6 {
+                scheduleHiResRender()
+            } else {
+                hiResTask?.cancel()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
             ViewerWindowMemory.fullScreenTransitioning = true
@@ -718,9 +731,6 @@ struct ViewerView: View {
                 // The strip is pinned on via the right-click menu (or T).
                 if showFilmstrip {
                     filmstrip
-                        .onHover { hovering in
-                            filmstripHovering = hovering
-                        }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 compactStatusBar
@@ -786,34 +796,33 @@ struct ViewerView: View {
                 .help(p.favorite ? "Remove from Favorites (.)" : "Add to Favorites (.)")
                 .accessibilityLabel(p.favorite ? "Remove from Favorites" : "Add to Favorites")
 
-                if !isCompactWindow {
+                if topBarShowSecondary {
                     starPicker(for: p)
                 }
             }
 
-            if !isCompactWindow {
+            if !isCompactWindow && contentWidth >= 560 {
                 zoomControls
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.16))
                     .frame(width: 1, height: 18)
                     .padding(.horizontal, 3)
+            }
 
+            if topBarShowSecondary {
                 iconButton("rectangle.bottomthird.inset.filled",
                            help: "Show or hide filmstrip (T)",
                            active: showFilmstrip) {
                     showFilmstrip.toggle()
-                    hoverFilmstripIndex = nil
                 }
+            }
+            if topBarShowUtilities {
                 iconButton("folder", help: "Show in Finder") { revealInFinder() }
                 iconButton(slideshow ? "pause.fill" : "play.fill",
                            help: slideshow ? "Pause slideshow (S)" : "Start slideshow (S)") {
                     toggleSlideshow()
                 }
-                Rectangle()
-                    .fill(Color.primary.opacity(0.16))
-                    .frame(width: 1, height: 18)
-                    .padding(.horizontal, 3)
             }
 
             Spacer(minLength: 4)
@@ -839,8 +848,18 @@ struct ViewerView: View {
         .glassSurface(cornerRadius: isCompactWindow ? 18 : 20)
         .padding(.leading, 10)
         .padding(.trailing, 10)
-        .padding(.top, 8)
+        // In full screen the native menu bar owns the top strip of the screen
+        // and slides down when the pointer reaches the top edge; keeping the
+        // glass bar below that strip means the two never read as a double menu.
+        .padding(.top, fullScreenActive ? 26 : 8)
     }
+
+    // Responsive top bar tiers: on narrow (small-photo) windows optional
+    // controls drop out so the single bar never overflows. Essentials —
+    // window controls, prev/next, favorite, info, adjustments, full screen,
+    // settings — always stay.
+    private var topBarShowSecondary: Bool { contentWidth >= 400 }   // filmstrip toggle, star picker
+    private var topBarShowUtilities: Bool { contentWidth >= 500 }   // folder, slideshow
 
     /// macOS Finder-style status bar for the compact window, pinned to the
     /// window's bottom edge: filename and position on the left, photo facts
@@ -1069,26 +1088,9 @@ struct ViewerView: View {
                             // an index-based identity reuses a cell for a different
                             // file when the folder is rescanned, which used to leave
                             // the old image (and its tooltip) under the new filename.
-                            // Dock-style magnification: the hovered thumb grows,
-                            // its neighbours swell a little, like the macOS Dock.
-                            let distance = hoverFilmstripIndex.map { abs($0 - i) } ?? 99
-                            let magnify: CGFloat = distance == 0 ? 1.7
-                                : distance == 1 ? 1.32
-                                : distance == 2 ? 1.12 : 1.0
                             FilmstripCell(photo: p,
                                           selected: p.id == currentPhotoID,
-                                          size: filmstripThumb,
-                                          onHover: { hovering in
-                                              if hovering {
-                                                  hoverFilmstripIndex = i
-                                              } else if hoverFilmstripIndex == i {
-                                                  hoverFilmstripIndex = nil
-                                              }
-                                          })
-                                .scaleEffect(magnify, anchor: .bottom)
-                                .zIndex(magnify > 1 ? 10 : 0)
-                                .animation(.spring(response: 0.3, dampingFraction: 0.8),
-                                           value: hoverFilmstripIndex)
+                                          size: filmstripThumb)
                                 .id(p.id)
                                 .onTapGesture { goTo(i) }
                         }
@@ -1097,9 +1099,6 @@ struct ViewerView: View {
                     .padding(.vertical, 8)
                 }
                 .frame(height: filmstripBarHeight)
-                // Dock magnification grows the hovered thumb above the strip:
-                // without this the scroll view clips it and nothing is visible.
-                .scrollClipDisabled(true)
                 .onChange(of: currentPhotoID) { _, newValue in
                     // Mouse-wheel stepping must not shift the strip under the
                     // pointer; keep its position and just move the highlight.
@@ -1664,6 +1663,14 @@ struct ViewerView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             guard !isFullScreen else { return }
             guard let w = targetWindow else { return }
+            // Long photos enter full screen straight from the grid window, so
+            // the compact pass never ran for this window. Strip every piece of
+            // native chrome BEFORE toggling, otherwise the title bar/toolbar
+            // flash and can read as a second menu over the photo.
+            w.toolbar?.isVisible = false
+            w.styleMask.insert(.fullSizeContentView)
+            w.titleVisibility = .hidden
+            w.titlebarAppearsTransparent = true
             NSApp.activate(ignoringOtherApps: true)
             w.makeKeyAndOrderFront(nil)
             w.toggleFullScreen(nil)
@@ -1906,6 +1913,27 @@ struct ViewerView: View {
         isCropping = false
         cropRect = .zero
         exif = []
+        hiResTask?.cancel()
+        hiResTask = nil
+        hiResRendered = false
+    }
+
+    /// Decode cap for the on-screen render. The first paint uses 3000px (fast
+    /// open); once the user zooms in, one sharper decode replaces it so text is
+    /// readable. The cap keeps memory bounded: ≤ 10000px on the long side and
+    /// ≤ 48 MP overall.
+    private var hiResPixelCap: CGFloat {
+        guard let p = photo else { return 3000 }
+        let w = CGFloat(max(p.width, 1)), h = CGFloat(max(p.height, 1))
+        if w <= 0 || h <= 0 { return 3000 }
+        let long = max(w, h)
+        var cap = min(long, 10000)
+        let area = w * h
+        if area > 48_000_000 {
+            // Too many pixels for memory: scale the cap down proportionally.
+            cap = min(cap, long * sqrt(48_000_000 / area))
+        }
+        return max(cap, 3000)
     }
 
     private func load() {
@@ -1964,11 +1992,36 @@ struct ViewerView: View {
         guard let p = photo else { return }
         let path = p.path
         let r = recipe
+        let cap = hiResRendered ? hiResPixelCap : 3000
         DispatchQueue.global(qos: .userInitiated).async {
-            let img = Editor.render(path: path, recipe: r, maxPixel: 3000)
+            let img = Editor.render(path: path, recipe: r, maxPixel: cap)
             DispatchQueue.main.async {
                 guard photo?.id == p.id else { return }
                 image = img
+            }
+        }
+    }
+
+    /// One sharper decode per photo after the user zooms in: the 3000px first
+    /// paint is quick but soft on big images (a 13780px-tall screenshot is
+    /// downscaled 4.6×); this restores true pixels so text is readable.
+    private func scheduleHiResRender() {
+        guard !hiResRendered, zoom > 1.6, let p = photo else { return }
+        let path = p.path
+        let id = p.id
+        let cap = hiResPixelCap
+        let r = recipe
+        hiResTask?.cancel()
+        hiResTask = Task {
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled else { return }
+            let img = await Task.detached(priority: .userInitiated) {
+                Editor.render(path: path, recipe: r, maxPixel: cap)
+            }.value
+            await MainActor.run {
+                guard !Task.isCancelled, photo?.id == id, let img else { return }
+                image = img
+                hiResRendered = true
             }
         }
     }
@@ -2029,7 +2082,7 @@ struct ViewerView: View {
                 chromeVisible.toggle()
                 return nil
             case 3: toggleFullScreen(); return nil             // f
-            case 17: showFilmstrip.toggle(); hoverFilmstripIndex = nil; return nil        // t
+            case 17: showFilmstrip.toggle(); return nil        // t
             case 11: showTopBar.toggle(); return nil           // b
             case 34: showInfo.toggle(); return nil             // i
             case 14: showEdit.toggle(); return nil             // e
@@ -2151,7 +2204,6 @@ private struct FilmstripCell: View {
     let photo: Photo
     let selected: Bool
     let size: CGFloat
-    var onHover: ((Bool) -> Void)? = nil
     @State private var image: NSImage?
 
     var body: some View {
@@ -2173,7 +2225,6 @@ private struct FilmstripCell: View {
         .opacity(selected ? 1 : 0.72)
         .scaleEffect(selected ? 1 : 0.96)
         .animation(.easeInOut(duration: 0.18), value: selected)
-        .onHover { hovering in onHover?(hovering) }
         .task(id: "\(photo.id)-\(Int(size))") {
             image = await ThumbnailService.shared.thumbnail(
                 path: photo.path, mtime: photo.mtime, size: size * 2
