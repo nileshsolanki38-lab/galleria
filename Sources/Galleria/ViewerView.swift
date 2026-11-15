@@ -186,6 +186,18 @@ struct ViewerView: View {
                     }
             }
         }
+        // Live resize can leave the GeometryReader stranded on an intermediate
+        // width (its final change is coalesced away), which made the top bar
+        // keep a stale tier and look cropped at small sizes. The window's own
+        // resize notifications always fire, including the last one, so they
+        // settle `contentWidth` at the true final width.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { note in
+            guard let w = note.object as? NSWindow,
+                  w === targetWindow,
+                  !w.styleMask.contains(.fullScreen) else { return }
+            let cw = w.contentView?.frame.width ?? 0
+            if cw > 0, abs(cw - contentWidth) > 0.5 { contentWidth = cw }
+        }
         // Right-click anywhere for every viewer option. This is the way back if
         // the top bar (or all chrome) has been hidden.
         .contextMenu { viewerContextMenu }
@@ -315,8 +327,15 @@ struct ViewerView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { _ in
             ViewerWindowMemory.fullScreenTransitioning = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
             ViewerWindowMemory.fullScreenTransitioning = false
+            // Native full screen can drop the window's minimum-content-size
+            // constraint; re-assert the resize floor so a drag never makes the
+            // window smaller than the top bar (nothing crops). Use the window
+            // from the notification: NSApp.mainWindow can still be nil here.
+            if let w = note.object as? NSWindow, !w.styleMask.contains(.fullScreen) {
+                w.contentMinSize = NSSize(width: 460, height: 400)
+            }
         }
         // The catalogue can change while the viewer is open (a folder scan after
         // "Open With"). Keep the folder scope fresh and re-anchor on the photo the
@@ -810,7 +829,7 @@ struct ViewerView: View {
                 }
             }
 
-            if !isCompactWindow && contentWidth >= 560 {
+            if !isCompactWindow && contentWidth >= 660 {
                 zoomControls
 
                 Rectangle()
@@ -864,11 +883,12 @@ struct ViewerView: View {
     }
 
     // Responsive top bar tiers: on narrow (small-photo) windows optional
-    // controls drop out so the single bar never overflows. Essentials —
-    // window controls, prev/next, favorite, info, adjustments, full screen,
-    // settings — always stay.
-    private var topBarShowSecondary: Bool { contentWidth >= 400 }   // filmstrip toggle, star picker
-    private var topBarShowUtilities: Bool { contentWidth >= 500 }   // folder, slideshow
+    // controls drop out so the single bar never overflows. Thresholds are
+    // measured, not guessed: each tier's bar width plus breathing room fits
+    // at its lower bound (verified at 460/500/540/640), so a window at the
+    // 460pt resize floor always renders the bar perfectly.
+    private var topBarShowSecondary: Bool { contentWidth >= 470 }   // filmstrip toggle, star picker
+    private var topBarShowUtilities: Bool { contentWidth >= 520 }   // folder, slideshow
 
     /// macOS Finder-style status bar for the compact window, pinned to the
     /// window's bottom edge: filename and position on the left, photo facts
@@ -1633,30 +1653,41 @@ struct ViewerView: View {
     /// toolbar is managed through AppKit: toggling it through SwiftUI's toolbar
     /// modifier makes macOS drop out of full screen when the catalogue refreshes.
     private func applyPresentationOnOpen() {
-        if let w = targetWindow {
-            // Remember the grid's toolbar state across viewer re-creations, and
-            // refresh it only when the window is back to a normal grid window.
-            if ViewerWindowMemory.toolbarVisible == nil || w.styleMask.contains(.resizable) {
-                ViewerWindowMemory.toolbarVisible = w.toolbar?.isVisible
-            }
-            savedToolbarVisible = ViewerWindowMemory.toolbarVisible
-            w.toolbar?.isVisible = false
-            // The glass bar carries its own traffic lights; the native ones
-            // would duplicate them (and reappear over the photo when the
-            // pointer touches the screen's top edge in full screen).
-            w.standardWindowButton(.closeButton)?.isHidden = true
-            w.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            w.standardWindowButton(.zoomButton)?.isHidden = true
-            // Resize limit: never allow a window smaller than the fixed chrome
-            // (top bar + status bar) plus a usable photo area, so the photo
-            // can never be cropped or overlapped by the bars.
-            if savedContentMinSize == nil { savedContentMinSize = w.contentMinSize }
-            w.contentMinSize = NSSize(width: 460, height: 400)
-        }
+        // The window may not be main yet when the viewer appears; the chrome
+        // rules need a concrete window, so retry briefly until one resolves.
+        applyViewerWindowRules(retries: 8)
         // Every photo opens full screen: the compact photo-shaped window
         // cropped the chrome on long images. A single request is enough;
         // retrying during the full-screen animation can wedge AppKit.
         enterFullScreenOnOpen()
+    }
+
+    /// Hide the native window buttons (the glass bar carries its own) and set
+    /// the resize floor: never allow a window smaller than the fixed chrome
+    /// (top bar + status bar) plus a usable photo area, so the photo can never
+    /// be cropped or overlapped by the bars.
+    private func applyViewerWindowRules(retries: Int) {
+        guard let w = targetWindow else {
+            if retries > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    applyViewerWindowRules(retries: retries - 1)
+                }
+            }
+            return
+        }
+        if ViewerWindowMemory.toolbarVisible == nil || w.styleMask.contains(.resizable) {
+            ViewerWindowMemory.toolbarVisible = w.toolbar?.isVisible
+        }
+        savedToolbarVisible = ViewerWindowMemory.toolbarVisible
+        w.toolbar?.isVisible = false
+        // The glass bar carries its own traffic lights; the native ones would
+        // duplicate them (and reappear over the photo when the pointer touches
+        // the screen's top edge in full screen).
+        w.standardWindowButton(.closeButton)?.isHidden = true
+        w.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        w.standardWindowButton(.zoomButton)?.isHidden = true
+        if savedContentMinSize == nil { savedContentMinSize = w.contentMinSize }
+        w.contentMinSize = NSSize(width: 460, height: 400)
     }
 
     /// Full screen on open: used when the viewer opens in the immersive

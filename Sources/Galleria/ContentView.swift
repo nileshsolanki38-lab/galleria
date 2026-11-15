@@ -160,10 +160,12 @@ struct ContentView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
-        // The grid needs room for its sidebar and timeline, but the viewer's
-        // compact presentation must be free to shrink to the photo's own size.
-        .frame(minWidth: viewerIndex == nil ? 980 : 0,
-               minHeight: viewerIndex == nil ? 620 : 0)
+        // The grid needs room for its sidebar and timeline. With the viewer
+        // open the floor drops to the viewer's own resize limit (460x400):
+        // the top bar plus a usable photo area always fit, so nothing is
+        // ever cropped no matter how small the user drags the window.
+        .frame(minWidth: viewerIndex == nil ? 980 : 460,
+               minHeight: viewerIndex == nil ? 620 : 400)
         .animation(.easeInOut(duration: 0.22), value: viewerIndex)
         .alert("New Album", isPresented: $showNewAlbum) {
             TextField("Album name", text: $newAlbumName)
