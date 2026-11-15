@@ -714,11 +714,26 @@ struct ViewerView: View {
             VStack(spacing: 0) {
                 if chromeVisible && showTopBar {
                     topBar
+                } else if !isFullScreen {
+                    // Windowed viewer with the chrome hidden: the three window
+                    // buttons stay reachable in a small floating pill, so a
+                    // manually resized window can always be closed, minimized
+                    // or zoomed.
+                    HStack(spacing: 0) {
+                        windowControls
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 5)
+                            .glassSurface(cornerRadius: 16)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, 10)
+                    .padding(.top, 8)
+                    .transition(.opacity)
                 }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .allowsHitTesting(chromeVisible && showTopBar)
+            .allowsHitTesting((chromeVisible && showTopBar) || !isFullScreen)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -776,7 +791,7 @@ struct ViewerView: View {
             iconButton("chevron.right", help: "Next photo (→)") { step(1) }
                 .disabled(index >= photos.count - 1)
 
-            if let p = photo {
+            if contentWidth >= 340, let p = photo {
                 Button {
                     library.setFavorite([p.id], favorite: !p.favorite)
                 } label: {
@@ -1632,6 +1647,11 @@ struct ViewerView: View {
             w.standardWindowButton(.closeButton)?.isHidden = true
             w.standardWindowButton(.miniaturizeButton)?.isHidden = true
             w.standardWindowButton(.zoomButton)?.isHidden = true
+            // Resize limit: never allow a window smaller than the fixed chrome
+            // (top bar + status bar) plus a usable photo area, so the photo
+            // can never be cropped or overlapped by the bars.
+            if savedContentMinSize == nil { savedContentMinSize = w.contentMinSize }
+            w.contentMinSize = NSSize(width: 460, height: 400)
         }
         // Every photo opens full screen: the compact photo-shaped window
         // cropped the chrome on long images. A single request is enough;
@@ -1870,6 +1890,8 @@ struct ViewerView: View {
             w.setFrame(frame, display: true)
             savedWindowFrame = nil
         }
+        w.contentMinSize = savedContentMinSize ?? NSSize(width: 0, height: 0)
+        savedContentMinSize = nil
         compactApplied = false
         if let visible = savedToolbarVisible {
             w.toolbar?.isVisible = visible
