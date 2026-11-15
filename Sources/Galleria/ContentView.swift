@@ -1201,6 +1201,7 @@ struct PhotoCell: View {
             if let image {
                 Image(nsImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
                     .transition(.opacity)
             } else if failed {

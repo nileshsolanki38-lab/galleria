@@ -8,18 +8,43 @@ import CoreImage
 final class ThumbnailService {
     static let shared = ThumbnailService()
 
+    /// One canonical thumbnail per photo, rendered large enough for the biggest
+    /// consumer (a 320pt grid cell on a Retina display). Consumers downscale
+    /// from it, so enlarging a cell or using the same thumb elsewhere can never
+    /// reveal a blurry, too-small bitmap. The cache key intentionally does NOT
+    /// include the requested size: an entry keyed per size used to let whichever
+    /// size was requested first win, leaving some thumbnails permanently soft.
+    private static let canonicalPixel: CGFloat = 640
+    /// Disk file version: bump when the canonical render changes so older,
+    /// smaller thumbnails regenerate instead of being served stale.
+    private static let diskVersion = "v3"
+
     private let mem = NSCache<NSString, NSImage>()
     private let queue = DispatchQueue(label: "com.galleria.thumbs", qos: .userInitiated, attributes: .concurrent)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private init() {
-        mem.countLimit = 4000
+        mem.countLimit = 3000
+        mem.totalCostLimit = 384 * 1024 * 1024
+        // One-time sweep: thumbnails written by older versions were rendered at
+        // smaller canonical sizes; drop them so they regenerate at full quality.
+        DispatchQueue.global(qos: .utility).async {
+            let dir = LibraryStore.thumbnailCacheDir
+            if let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                for url in items where url.pathExtension == "jpg"
+                    && !url.lastPathComponent.hasSuffix("_\(Self.diskVersion)") {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+        }
     }
 
     func cachedThumbnail(path: String, mtime: Double) -> NSImage? {
         mem.object(forKey: Self.key(path, mtime) as NSString)
     }
 
+    /// `size` is kept for API compatibility; every thumbnail is rendered at the
+    /// canonical pixel size, so a small request never poisons the cache.
     func thumbnail(path: String, mtime: Double, size: CGFloat = 320) async -> NSImage? {
         let k = Self.key(path, mtime)
         if let hit = mem.object(forKey: k as NSString) { return hit }
@@ -28,8 +53,8 @@ final class ThumbnailService {
                 if let hit = self.mem.object(forKey: k as NSString) {
                     cont.resume(returning: hit); return
                 }
-                let img = self.loadThumbnail(path: path, mtime: mtime, size: size)
-                if let img { self.mem.setObject(img, forKey: k as NSString) }
+                let img = self.loadThumbnail(path: path, mtime: mtime)
+                if let img { self.mem.setObject(img, forKey: k as NSString, cost: Self.cost(of: img)) }
                 cont.resume(returning: img)
             }
         }
@@ -41,21 +66,26 @@ final class ThumbnailService {
 
     private static func diskName(_ path: String, _ mtime: Double) -> String {
         let digest = SHA256.hash(data: Data("\(path)|\(Int(mtime))".utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return digest.map { String(format: "%02x", $0) }.joined() + "_\(diskVersion)"
     }
 
-    private func loadThumbnail(path: String, mtime: Double, size: CGFloat) -> NSImage? {
+    private static func cost(of image: NSImage) -> Int {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        return cg.bytesPerRow > 0 ? cg.bytesPerRow * cg.height : cg.width * cg.height * 4
+    }
+
+    private func loadThumbnail(path: String, mtime: Double) -> NSImage? {
         let diskURL = LibraryStore.thumbnailCacheDir
             .appendingPathComponent(Self.diskName(path, mtime))
             .appendingPathExtension("jpg")
 
         if let img = NSImage(contentsOf: diskURL) { return img }
 
-        guard let cg = Imaging.baseCGImage(path: path, maxPixel: size) else { return nil }
+        guard let cg = Imaging.baseCGImageCover(path: path, minPixel: Self.canonicalPixel) else { return nil }
 
         // Persist as JPEG for instant subsequent loads.
         if let dest = CGImageDestinationCreateWithURL(diskURL as CFURL, "public.jpeg" as CFString, 1, nil) {
-            CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+            CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
             CGImageDestinationFinalize(dest)
         }
 
@@ -112,6 +142,22 @@ enum Imaging {
     }
 
     /// Decodes any supported file to a downsampled CGImage, honouring EXIF orientation.
+    /// Like `baseCGImage` but guarantees BOTH sides are at least `minPixel`
+    /// (long side capped at `maxLongSide`). The grid's aspect-fill square crop
+    /// on an extreme panorama or long screenshot otherwise upscales a thin
+    /// slice of a small thumbnail, which reads as blur.
+    static func baseCGImageCover(path: String, minPixel: CGFloat, maxLongSide: CGFloat = 4096) -> CGImage? {
+        guard let size = pixelSize(path: path), size.width > 0, size.height > 0 else {
+            return baseCGImage(path: path, maxPixel: minPixel)
+        }
+        let longSide = max(size.width, size.height)
+        let shortSide = min(size.width, size.height)
+        var target = longSide * (minPixel / shortSide)
+        if target > maxLongSide { target = maxLongSide }
+        target = max(target, minPixel)
+        return baseCGImage(path: path, maxPixel: target)
+    }
+
     static func baseCGImage(path: String, maxPixel: CGFloat) -> CGImage? {
         if let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
            CGImageSourceGetCount(src) > 0 {
