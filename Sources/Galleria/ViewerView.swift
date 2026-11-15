@@ -63,11 +63,11 @@ struct ViewerView: View {
     // Viewer preferences and chrome extras.
     @AppStorage("viewer.filmstripThumbSize") private var filmstripThumbSize: Double = 84
     @AppStorage("viewer.slideshowInterval") private var slideshowInterval: Double = 3
-    /// Single tuned presentation: the compact glass window. The old
-    /// "Full screen / Compact" setting kept switching window chrome mid-open
-    /// and caused top-bar glitches, so it is removed — Full Screen stays
-    /// available as a temporary action (F), not a mode.
-    private let presentation = "compact"
+    /// Single presentation: the immersive full-screen viewer. The old compact
+    /// photo-shaped window cropped the chrome on long images, so every photo
+    /// now opens full screen; exiting full screen keeps the viewer open in a
+    /// normal window instead of a compact one.
+    private let presentation = "fullscreen"
     @AppStorage("viewer.showTopBar") private var showTopBar = false
     @AppStorage("viewer.startHidden") private var startHidden = false
     @State private var showViewerSettings = false
@@ -382,21 +382,15 @@ struct ViewerView: View {
         .animation(.easeInOut(duration: 0.32), value: photo?.id)
     }
 
-    /// Two-stage outside-tap collapse: first tap leaves full screen and collapses to a
-    /// photo-sized compact window (filmstrip stays anchored at the window bottom),
-    /// second tap returns to the grid. A stray double-click cannot skip a stage.
+    /// Two-stage outside-tap: first tap leaves full screen (the viewer stays
+    /// open in a normal window), second tap returns to the grid. A stray
+    /// double-click cannot skip a stage.
     private func handleOutsideTap() {
         if Date.now.timeIntervalSince(lastOutsideAction) < 0.35 { return }
         lastOutsideAction = Date.now
         if isFullScreen {
             toggleFullScreen()
-            // After leaving full screen, collapse to the photo-sized window.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-                guard !isFullScreen else { return }
-                applyCompactWindow()
-            }
         } else {
-            // Already compact (photo-sized): tap goes back to the grid.
             onClose()
         }
     }
@@ -1632,26 +1626,17 @@ struct ViewerView: View {
             }
             savedToolbarVisible = ViewerWindowMemory.toolbarVisible
             w.toolbar?.isVisible = false
+            // The glass bar carries its own traffic lights; the native ones
+            // would duplicate them (and reappear over the photo when the
+            // pointer touches the screen's top edge in full screen).
+            w.standardWindowButton(.closeButton)?.isHidden = true
+            w.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            w.standardWindowButton(.zoomButton)?.isHidden = true
         }
-        // A long photo (at least twice as tall as wide — scrolling screenshots,
-        // tall panoramas) never fits a compact photo-shaped window without
-        // becoming an unreadable sliver, so it opens full screen by default.
-        if isCompactPresentation && !photoIsLong {
-            // Let the viewer's insertion animation settle before resizing.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                applyCompactWindow()
-            }
-        } else {
-            enterFullScreenOnOpen()
-        }
-    }
-
-    /// "Long" photo: at least twice as tall as wide. These open full screen
-    /// instead of the compact photo-shaped window.
-    private var photoIsLong: Bool {
-        let p = photo ?? photo(at: index)
-        guard let p, p.width > 0, p.height > 0 else { return false }
-        return CGFloat(p.height) / CGFloat(p.width) >= 2.0
+        // Every photo opens full screen: the compact photo-shaped window
+        // cropped the chrome on long images. A single request is enough;
+        // retrying during the full-screen animation can wedge AppKit.
+        enterFullScreenOnOpen()
     }
 
     /// Full screen on open: used when the viewer opens in the immersive
@@ -1850,15 +1835,15 @@ struct ViewerView: View {
         return size
     }
 
-    /// Undo everything `applyCompactWindow` changed, so the grid gets its normal
-    /// window (frame, title bar, traffic lights, toolbar) back.
+    /// Undo everything the viewer changed on the shared window, so the grid
+    /// gets its normal window (frame, title bar, traffic lights, toolbar) back.
     private func restoreWindowChrome() {
         guard let w = targetWindow else { return }
         if ViewerWindowMemory.fullScreenTransitioning {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { restoreWindowChrome() }
             return
         }
-        if compactApplied && w.styleMask.contains(.fullScreen) {
+        if w.styleMask.contains(.fullScreen) {
             // Leave full screen first, then put the grid's window back the way it was.
             w.toggleFullScreen(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
@@ -1870,20 +1855,22 @@ struct ViewerView: View {
     }
 
     private func restoreCompactState(on w: NSWindow) {
-        if compactApplied {
-            if let mask = savedStyleMask { w.styleMask = mask }
-            w.titleVisibility = savedTitleVisibility
-            w.titlebarAppearsTransparent = savedTitlebarTransparent
-            w.isMovableByWindowBackground = false
-            w.standardWindowButton(.closeButton)?.isHidden = false
-            w.standardWindowButton(.miniaturizeButton)?.isHidden = false
-            w.standardWindowButton(.zoomButton)?.isHidden = false
-            w.contentMinSize = savedContentMinSize ?? NSSize(width: 0, height: 0)
-            if let frame = savedWindowFrame {
-                w.setFrame(frame, display: true)
-            }
-            compactApplied = false
+        // Always restore the grid's native chrome: with every photo opening
+        // full screen, the viewer hides the window buttons up front, so the
+        // grid gets them back unconditionally on close.
+        w.styleMask.remove(.fullSizeContentView)
+        w.titleVisibility = .visible
+        w.titlebarAppearsTransparent = false
+        w.isMovableByWindowBackground = false
+        w.standardWindowButton(.closeButton)?.isHidden = false
+        w.standardWindowButton(.miniaturizeButton)?.isHidden = false
+        w.standardWindowButton(.zoomButton)?.isHidden = false
+        if let mask = savedStyleMask { w.styleMask = mask; savedStyleMask = nil }
+        if let frame = savedWindowFrame, !w.styleMask.contains(.fullScreen) {
+            w.setFrame(frame, display: true)
+            savedWindowFrame = nil
         }
+        compactApplied = false
         if let visible = savedToolbarVisible {
             w.toolbar?.isVisible = visible
             savedToolbarVisible = nil
@@ -2038,7 +2025,9 @@ struct ViewerView: View {
                 if now.timeIntervalSince(ScrollZoom.lastFilmstripStep) < 0.22 { return true }
                 ScrollZoom.filmstripAccum += ctx.deltaY
                 if abs(ScrollZoom.filmstripAccum) >= 8 {
-                    let direction = ScrollZoom.filmstripAccum > 0 ? 1 : -1
+                    // Scroll down on the strip = previous photo (user preference:
+                    // reversed from the old mapping), scroll up = next.
+                    let direction = ScrollZoom.filmstripAccum > 0 ? -1 : 1
                     ScrollZoom.filmstripAccum = 0
                     ScrollZoom.lastFilmstripStep = now
                     // Keep the strip exactly where it is while the wheel steps
