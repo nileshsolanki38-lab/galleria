@@ -145,7 +145,14 @@ struct ViewerView: View {
 
     private var filmstripThumb: CGFloat { CGFloat(filmstripThumbSize) }
     private var filmstripBarHeight: CGFloat { filmstripThumb + 20 }
-    private var filmstripInset: CGFloat { showFilmstrip ? filmstripBarHeight + 26 : 18 }
+    /// Padding under the filmstrip glass, mirrored from the strip's own layout.
+    private var filmstripBottomPadding: CGFloat { isCompactWindow ? 8 : 14 }
+    /// Height the bottom chrome really occupies: the filmstrip glass plus its
+    /// padding, then the caption bar. The photo is fitted above exactly this, so
+    /// it can never slide under the strip.
+    private var bottomChromeInset: CGFloat {
+        (showFilmstrip ? filmstripBarHeight + filmstripBottomPadding : 0) + statusBarInset
+    }
     /// Height reserved at the compact window's bottom for the filename caption
     /// pill, so it never overlaps the photo or the filmstrip.
     private var statusBarInset: CGFloat { 24 }
@@ -432,42 +439,50 @@ struct ViewerView: View {
                     .allowsHitTesting(false)
 
                 if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: fitted.width, height: fitted.height)
-                        .scaleEffect(zoom)
-                        .offset(offset)
-                        .shadow(color: isCompactWindow ? .clear : .black.opacity(0.5),
-                                radius: isCompactWindow ? 0 : 28,
-                                y: isCompactWindow ? 0 : 12)
-                        .gesture(
-                            MagnificationGesture()
-                                .onChanged { value in
-                                    guard !isCropping else { return }
-                                    zoom = min(max(value, 1), 12)
-                                    if zoom <= 1 { offset = .zero }
-                                }
-                        )
-                        .simultaneousGesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    guard !isCropping, zoom > 1 else { return }
-                                    let base = panStart ?? offset
-                                    panStart = base
-                                    offset = CGSize(
-                                        width: base.width + value.translation.width,
-                                        height: base.height + value.translation.height
-                                    )
-                                }
-                                .onEnded { _ in panStart = nil }
-                        )
-                        .onTapGesture(count: 2) {
-                            // Double-click on the photo itself goes full screen.
-                            guard !isCropping else { return }
-                            toggleFullScreen()
-                        }
+                    // The checkerboard sits behind the photo, so transparent
+                    // pixels of a PNG/SVG read as "transparent" instead of
+                    // blending into the blurred backdrop. An opaque photo
+                    // covers it completely.
+                    ZStack {
+                        TransparencyChecker.Background()
+
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                    }
+                    .frame(width: fitted.width, height: fitted.height)
+                    .scaleEffect(zoom)
+                    .offset(offset)
+                    .shadow(color: isCompactWindow ? .clear : .black.opacity(0.5),
+                            radius: isCompactWindow ? 0 : 28,
+                            y: isCompactWindow ? 0 : 12)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                guard !isCropping else { return }
+                                zoom = min(max(value, 1), 12)
+                                if zoom <= 1 { offset = .zero }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { value in
+                                guard !isCropping, zoom > 1 else { return }
+                                let base = panStart ?? offset
+                                panStart = base
+                                offset = CGSize(
+                                    width: base.width + value.translation.width,
+                                    height: base.height + value.translation.height
+                                )
+                            }
+                            .onEnded { _ in panStart = nil }
+                    )
+                    .onTapGesture(count: 2) {
+                        // Double-click on the photo itself goes full screen.
+                        guard !isCropping else { return }
+                        toggleFullScreen()
+                    }
 
                     if isCropping {
                         cropOverlay(fitted: fitted)
@@ -508,15 +523,14 @@ struct ViewerView: View {
             return EdgeInsets(
                 top: chromeVisible && showTopBar ? 64 : 0,
                 leading: showEdit ? 280 : 0,
-                bottom: (showFilmstrip ? filmstripBarHeight + 26 : 0)
-                    + statusBarInset,
+                bottom: bottomChromeInset,
                 trailing: showInfo ? 280 : 0
             )
         }
         return EdgeInsets(
             top: showTopBar && chromeVisible ? 76 : 0,
             leading: showEdit ? 288 : 0,
-            bottom: showFilmstrip ? filmstripInset : 0,
+            bottom: bottomChromeInset,
             trailing: showInfo ? 288 : 0
         )
     }
@@ -773,7 +787,7 @@ struct ViewerView: View {
                 }
                 .padding(.leading, 16)
                 .padding(.top, 84)
-                .padding(.bottom, filmstripInset + 4)
+                .padding(.bottom, bottomChromeInset + 4)
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
@@ -784,7 +798,7 @@ struct ViewerView: View {
                 }
                 .padding(.trailing, 16)
                 .padding(.top, 84)
-                .padding(.bottom, filmstripInset + 4)
+                .padding(.bottom, bottomChromeInset + 4)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
@@ -1153,7 +1167,7 @@ struct ViewerView: View {
         .frame(maxWidth: .infinity)
         .glassSurface(cornerRadius: 18)
         .padding(.horizontal, isCompactWindow ? 8 : 16)
-        .padding(.bottom, isCompactWindow ? 8 : 14)
+        .padding(.bottom, filmstripBottomPadding)
     }
 
 
@@ -1814,7 +1828,7 @@ struct ViewerView: View {
         // fixed chrome strips so the photo itself stays photo-sized inside a
         // window that also contains its filmstrip/top bar.
         let titlebar: CGFloat = 0
-        let chromeH: CGFloat = (showFilmstrip ? filmstripBarHeight + 26 : 0)
+        let chromeH: CGFloat = (showFilmstrip ? filmstripBarHeight + filmstripBottomPadding : 0)
             + (chromeVisible && showTopBar ? 64 : 0)
             + statusBarInset
 
@@ -2250,10 +2264,14 @@ private struct FilmstripCell: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.35))
+            // Checkerboard backing: transparent icons stay readable on the
+            // dark strip (opaque photos cover it completely).
+            TransparencyChecker.Background()
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             if let image {
                 Image(nsImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
             }
         }

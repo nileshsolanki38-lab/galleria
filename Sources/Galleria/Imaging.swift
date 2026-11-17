@@ -17,7 +17,7 @@ final class ThumbnailService {
     private static let canonicalPixel: CGFloat = 640
     /// Disk file version: bump when the canonical render changes so older,
     /// smaller thumbnails regenerate instead of being served stale.
-    private static let diskVersion = "v3"
+    private static let diskVersion = "v4"
 
     private let mem = NSCache<NSString, NSImage>()
     private let queue = DispatchQueue(label: "com.galleria.thumbs", qos: .userInitiated, attributes: .concurrent)
@@ -31,8 +31,11 @@ final class ThumbnailService {
         DispatchQueue.global(qos: .utility).async {
             let dir = LibraryStore.thumbnailCacheDir
             if let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-                for url in items where url.pathExtension == "jpg"
-                    && !url.lastPathComponent.hasSuffix("_\(Self.diskVersion)") {
+                for url in items where url.pathExtension == "jpg" || url.pathExtension == "png"
+                    // The version suffix sits before the extension, so it must be
+                    // matched on the stem — checking the full name never matched
+                    // and the sweep deleted every thumbnail on each launch.
+                    && !url.deletingPathExtension().lastPathComponent.hasSuffix("_\(Self.diskVersion)") {
                     try? FileManager.default.removeItem(at: url)
                 }
             }
@@ -75,21 +78,38 @@ final class ThumbnailService {
     }
 
     private func loadThumbnail(path: String, mtime: Double) -> NSImage? {
-        let diskURL = LibraryStore.thumbnailCacheDir
-            .appendingPathComponent(Self.diskName(path, mtime))
-            .appendingPathExtension("jpg")
+        let dir = LibraryStore.thumbnailCacheDir
+        let stem = Self.diskName(path, mtime)
 
-        if let img = NSImage(contentsOf: diskURL) { return img }
+        // A thumbnail of a transparent image must keep its alpha: JPEG has no
+        // alpha channel, so caching one as JPEG flattens the transparent pixels
+        // to white and the checkerboard behind the photo never shows through.
+        // PNG is used whenever the source actually carries transparency.
+        let cached = Self.readCached(dir: dir, stem: stem)
+        if let cached { return cached }
 
         guard let cg = Imaging.baseCGImageCover(path: path, minPixel: Self.canonicalPixel) else { return nil }
 
-        // Persist as JPEG for instant subsequent loads.
-        if let dest = CGImageDestinationCreateWithURL(diskURL as CFURL, "public.jpeg" as CFString, 1, nil) {
-            CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        let transparent = Imaging.hasTransparency(cg)
+        let url = dir.appendingPathComponent(stem).appendingPathExtension(transparent ? "png" : "jpg")
+        if let dest = CGImageDestinationCreateWithURL(url as CFURL, (transparent ? "public.png" : "public.jpeg") as CFString, 1, nil) {
+            let props: CFDictionary = transparent
+                ? [:] as CFDictionary
+                : [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary
+            CGImageDestinationAddImage(dest, cg, props)
             CGImageDestinationFinalize(dest)
         }
 
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    /// Reads a cached thumbnail, trying the lossless PNG first.
+    private static func readCached(dir: URL, stem: String) -> NSImage? {
+        for ext in ["png", "jpg"] {
+            let url = dir.appendingPathComponent(stem).appendingPathExtension(ext)
+            if let img = NSImage(contentsOf: url) { return img }
+        }
+        return nil
     }
 
     func clearDiskCache() {
@@ -139,6 +159,40 @@ enum Imaging {
         img.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
         NSGraphicsContext.restoreGraphicsState()
         return rep.cgImage
+    }
+
+    /// True when the image carries real transparency — at least one pixel that
+    /// is not fully opaque.
+    ///
+    /// The alpha channel's mere presence is not enough: HEIC and some PNGs
+    /// declare an alpha channel that is entirely opaque. Those can be cached as
+    /// JPEG without losing anything.
+    static func hasTransparency(_ image: CGImage) -> Bool {
+        switch image.alphaInfo {
+        case .none, .noneSkipLast, .noneSkipFirst:
+            return false
+        default:
+            break
+        }
+        // Read the alpha plane. A single fully transparent pixel is enough to
+        // require a lossless cache format.
+        //
+        // The image is redrawn into an RGBA context and only the alpha byte is
+        // inspected: an `alphaOnly` grayscale context silently yields opaque
+        // values for every pixel, which would report every image as opaque.
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { return false }
+        var buffer = [UInt8](repeating: 255, count: w * h * 4)
+        guard let ctx = CGContext(data: &buffer, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var minAlpha = 255
+        for i in stride(from: 3, to: buffer.count, by: 4) where Int(buffer[i]) < minAlpha {
+            minAlpha = Int(buffer[i])
+        }
+        return minAlpha < 255
     }
 
     /// Decodes any supported file to a downsampled CGImage, honouring EXIF orientation.

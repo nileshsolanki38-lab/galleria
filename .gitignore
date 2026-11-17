@@ -9,3 +9,6 @@ dist/
 # Xcode
 xcuserdata/
 *.xcodeproj/xcuserdata/
+
+# QA scratch
+.qa_tmp/

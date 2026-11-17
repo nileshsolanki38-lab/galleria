@@ -1131,6 +1131,52 @@ struct ViewerTarget: Identifiable {
 
 // MARK: - Thumbnail cell
 
+/// Checkerboard backing for transparent images, following the universal
+/// transparency convention (Preview, Photoshop): transparent PNGs/SVGs —
+/// especially black glyphs — would otherwise melt into the background and
+/// become unreadable. Opaque photos cover the board completely, so only
+/// genuinely transparent pixels let it show through.
+enum TransparencyChecker {
+    /// Side of one square, in points.
+    static let square: CGFloat = 7
+
+    /// Light and dark square tones — the Photoshop/Preview convention.
+    private static let light = Color(white: 0.95)
+    private static let dark = Color(white: 0.78)
+
+    /// The checkerboard as a view that fills the space it is given.
+    ///
+    /// Drawn with `Canvas`, the way the design tools do it: the squares are
+    /// real geometry, so the board stays crisp at any zoom and never depends on
+    /// image tiling. A tiled `Image` was tried first and is silently dropped
+    /// when an ancestor applies the frame, and a pattern `NSColor` cannot be
+    /// rendered by SwiftUI at all (`Color(nsColor:)` paints one flat colour).
+    struct Background: View {
+        var body: some View {
+            Canvas { ctx, size in
+                let s = TransparencyChecker.square
+                ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(light))
+
+                // One path for every dark square, so the board is a single fill.
+                var darkSquares = Path()
+                var row = 0
+                var y: CGFloat = 0
+                while y < size.height {
+                    var x: CGFloat = (row % 2 == 0) ? 0 : s
+                    while x < size.width {
+                        darkSquares.addRect(CGRect(x: x, y: y, width: s, height: s))
+                        x += 2 * s
+                    }
+                    y += s
+                    row += 1
+                }
+                ctx.fill(darkSquares, with: .color(dark))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
 /// Transparent click handler for grid cells. AppKit tracks click counts per window,
 /// so a double-click is recognised even if the cell re-renders between clicks.
 private struct ClickCatcher: NSViewRepresentable {
@@ -1195,8 +1241,8 @@ struct PhotoCell: View {
 
     private var thumbnail: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: corner)
-                .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.22))
+            TransparencyChecker.Background()
+                .clipShape(RoundedRectangle(cornerRadius: corner))
 
             if let image {
                 Image(nsImage: image)
