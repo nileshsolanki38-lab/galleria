@@ -130,6 +130,8 @@ open dist/Galleria.app
 
 ## 📸 Screenshots
 
+![Galleria demo — grid, viewer and transparency checkerboard](screenshots/demo.gif)
+
 ### Photo library (grid)
 ![Photo library grid](screenshots/grid.png)
 
