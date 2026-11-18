@@ -123,6 +123,8 @@ open dist/Galleria.app
 ### 🖥 Window chrome
 - Native minimise / maximise / close, transparent glass panels.
 - Finder-style status bar: filename · counter · dimensions · file size · type.
+- **Fast grid scrolling:** two-finger scrolling in the photo grid is amplified ~4× so a large library flies by; the sidebar, sheets and viewer keep native speed.
+- **Adjustment-panel scroll containment:** with the panel open, scrolling over it scrolls only the panel — the filmstrip and photo stay still.
 - Right-click — or the T/B/Tab/F shortcuts — to show or hide the top bar, filmstrip and other chrome; nothing floats over your photo.
 
 ---
@@ -257,11 +259,25 @@ open dist/Galleria.app
 - Adjustments is now a **compact 248pt panel** like Preview’s (small Light/Color/Detail sections), not the wide Picasa panel.
 - **Markup (Preview Toolbar):** Adjust → *Markup (Preview)*. Drag on the photo to add Rectangle / Oval / Line / Arrow / Text / Freehand with colour + stroke. Baked into export; Undo / Clear; stored non-destructively in the recipe.
 - **Resize (Preview Tools → Adjust Size):** Adjust → *Resize…* — width/height with proportional lock, live preview, export resized JPEG copy.
-- **Instant Alpha:** Adjust → *Alpha* — Vision foreground mask removes the background to a transparent PNG (checkerboard preview), export PNG.
+- **Remove Background (PhotoRoom-style):** select photo(s) in the grid → right-click → *Remove Background…*, or in the viewer *Adjust → Remove Background*. The subject is cut out instantly with Apple's offline Vision AI, then choose **transparent / white / black / custom** background and *Save to Library* — cutouts land in the watched `Galleria Exports` folder and appear automatically. Multi-select processes the whole batch. Your photos never leave the Mac.
+- **Presets:** Adjust → *Presets* — 12 curated looks (Punchy, Portrait Glow, Golden Hour, Moody Film, …) with live thumbnails of the current photo; save your own adjustment settings as a named preset and reapply them on any photo.
+- **Numeric adjustments:** every slider also has a type-in value field — enter an exact exposure, contrast, warmth etc. instead of dragging.
 - **Copy/Paste style:** Adjust → *Copy style / Paste* — copy the full adjustment recipe to another photo.
 
 ### Collage maker (F1 done — Picasa-style)
 - **Collage Maker** (`⇧⌘C`, toolbar `square.stack.3d.up`, thumbnail right-click → *Make Collage…*, viewer → *Make Collage…*): **Grid / Picture-in-Picture / Mosaic / Freestyle**, spacing 0–32 pt, corner radius, **Borders** (width + Black/White/Grey), **Caption** title band, PIP size/X/Y, **Shuffle**, Square / 4:3 / 16:9 canvas, background (White, Black, **None (transparent)**, Grey, Blue, Warm, Rose). Live preview; export to `~/Pictures/Galleria Exports/Collages` as JPEG.
+
+**Collage controls**
+
+| Action | How |
+| --- | --- |
+| Open the collage maker | `⇧⌘C` (or toolbar button, or right-click → *Make Collage…*) |
+| Add photos | Select them in the grid first, or use *Pick a folder of photos* in the top bar |
+| Arrange tiles | Photo order follows your selection; use *Shuffle* to rearrange |
+| Crop / zoom a tile | Click a tile to select it, then drag inside it to pan; pinch to zoom |
+| Shuffle the photo order | Top-bar *Shuffle* button |
+| Layout / canvas / background | Style bar one-tap buttons and pickers — your last choices are remembered |
+| Export | Top-bar *Export* → JPEG in `~/Pictures/Galleria Exports/Collages` |
 
 ### Filmstrip anchoring + collapse (viewer polish)
 - The filmstrip is pinned to the **window bottom** (not the photo): changing photos of different aspect ratios no longer moves it, so mouse scroll stays over the same pixels — over the strip it steps photos, over the photo it zooms. The compact window is **bottom-anchored** for the same reason; the photo fills the full area above the strip.
@@ -269,10 +285,10 @@ open dist/Galleria.app
 
 ### Pro tools (B5/C4/C5/C6/C8/D10/E1 done)
 - **Compare (B5):** toolbar `Compare` or right-click → side-by-side 2–4 photos with ratings/dimensions.
-- **People (C4):** sidebar Discover → People. On-device Vision face rectangles (no upload), per-photo counts, sample scan.
-- **Places (C5):** sidebar Discover → Places. MapKit pins for EXIF-GPS photos + list; empty state when no GPS.
+- **People (C4):** sidebar Discover → People. On-device Vision face detection over the **whole library**, indexed quietly in the background — no scan button, no prompts; results open instantly.
+- **Places (C5):** sidebar Discover → Places. MapKit pins for every EXIF-GPS photo, read from the cached location index.
 - **Smart Albums (C6):** sidebar Smart Albums → saved searches (name + search + min rating + favorites). Choose in sidebar to filter the grid.
-- **Duplicate Finder (C8):** sidebar Discover → duplicates. Perceptual SHA-256 of a tiny render groups copies; Reveal in Finder to delete manually (Galleria never deletes for you).
+- **Duplicate Finder (C8):** sidebar Discover → duplicates. 64-bit perceptual fingerprints of the whole library group near-duplicates (re-encodes, resized copies); Reveal in Finder to delete manually (Galleria never deletes for you).
 - **Red-eye assist (D10):** viewer Adjustments → Red-eye assist. Detects eyes via Vision landmarks; applies gentle eye-friendly colour (true inpainting out of scope).
 - **Batch (E1):** toolbar `Batch` or right-click → max dimension (keep / 1024 / 2048 / 4096), JPEG/PNG/HEIC, rename pattern `{name} {date} {index}`.
 

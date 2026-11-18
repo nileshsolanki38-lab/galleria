@@ -7,6 +7,20 @@ import ImageIO
 /// Copy/Paste style — compact like Preview's Tools / Adjust Size.
 
 enum InstantAlpha {
+    /// Result background after the subject is lifted.
+    enum Background: Equatable {
+        case transparent
+        case color(NSColor)
+
+        static func == (lhs: Background, rhs: Background) -> Bool {
+            switch (lhs, rhs) {
+            case (.transparent, .transparent): return true
+            case (.color(let a), .color(let b)): return a == b
+            default: return false
+            }
+        }
+    }
+
     /// Foreground mask image (scaled to the source resolution, 0=bg 1=fg).
     static func foregroundMask(cgImage: CGImage) -> CGImage? {
         let request = VNGenerateForegroundInstanceMaskRequest()
@@ -21,6 +35,8 @@ enum InstantAlpha {
     }
 
     /// Cut-out PNG: foreground from mask, background transparent.
+    /// This is Apple's offline subject-lift AI (the engine behind Photos'
+    /// "Lift Subject") — no uploads, no accounts.
     static func cutout(path: String, maxPixel: CGFloat = 2000) -> NSImage? {
         guard let src = Imaging.baseCGImage(path: path, maxPixel: maxPixel),
               let mask = foregroundMask(cgImage: src) else { return nil }
@@ -39,6 +55,29 @@ enum InstantAlpha {
             }
         }
         return nil
+    }
+
+    /// Flattens a transparent cutout onto a solid background colour, keeping
+    /// the cutout's pixel size. Nil background returns the cutout unchanged.
+    static func flattened(_ cutout: NSImage, background: Background) -> NSImage {
+        guard case .color(let color) = background else { return cutout }
+        let size = cutout.size
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return cutout }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        color.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        cutout.draw(in: NSRect(origin: .zero, size: size),
+                    from: NSRect(origin: .zero, size: size),
+                    operation: .sourceOver, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cg = rep.cgImage else { return cutout }
+        return NSImage(cgImage: cg, size: size)
     }
 }
 
@@ -180,79 +219,283 @@ struct ResizeSheet: View {
     }
 }
 
-// MARK: - Instant Alpha sheet
+// MARK: - Remove Background sheet (PhotoRoom-style)
 
-struct InstantAlphaSheet: View {
+/// PhotoRoom-style flow: the sheet opens on the already-selected photo(s) and
+/// immediately lifts the subject with Apple's offline AI. Then pick a
+/// background — transparent, white, black or a custom colour — and save. Saved
+/// PNGs land in the watched "Galleria Exports" folder, so they appear in the
+/// library a couple of seconds later. Works on multi-selection: one run
+/// processes every selected photo.
+struct RemoveBackgroundSheet: View {
     @EnvironmentObject var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
-    let photoID: Int64
-    @State private var cutout: NSImage?
+    let photoIDs: [Int64]
+
+    @State private var results: [Int64: NSImage] = [:]
+    @State private var currentID: Int64?
     @State private var busy = false
     @State private var status = ""
+    @State private var background: InstantAlpha.Background = .transparent
+    @State private var customColor: Color = .white
 
-    var photo: Photo? { library.photos.first { $0.id == photoID } }
+    private var photos: [Photo] {
+        photoIDs.compactMap { id in library.photos.first { $0.id == id } }
+    }
+
+    private var current: Photo? {
+        photos.first { $0.id == currentID } ?? photos.first
+    }
 
     var body: some View {
         VStack(spacing: 12) {
             HStack {
-                Label("Instant Alpha — Remove Background", systemImage: "wand.and.stars")
+                Label("Remove Background", systemImage: "wand.and.stars")
                     .font(.title3.weight(.semibold))
                 Spacer()
+                Text("Offline AI — your photo never leaves this Mac")
+                    .font(.caption).foregroundStyle(.secondary)
                 Button("Close") { dismiss() }.buttonStyle(.bordered).controlSize(.small)
             }
             Divider()
-            if let cutout {
-                Image(nsImage: cutout).resizable().aspectRatio(contentMode: .fit)
-                    .frame(maxHeight: 320)
-                    .background {
-                        Checkerboard().clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-            } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "wand.and.stars").font(.system(size: 40, weight: .light)).foregroundStyle(.tertiary)
-                    Text(busy ? "Finding the subject…" : "Creates a transparent PNG of the subject (Vision).")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if status.isEmpty { } else { Text(status).font(.caption).foregroundStyle(.secondary) }
+
+            if photos.count > 1 {
+                HStack {
+                    Text("Batch — \(doneCount) of \(photos.count) ready")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if busy { ProgressView().controlSize(.small) }
                 }
-                .frame(maxHeight: 320)
             }
+
+            previewArea
+
+            backgroundPicker
+
             HStack {
-                Button(busy ? "Working…" : "Remove Background") { run() }
-                    .buttonStyle(.borderedProminent).disabled(busy || photo == nil)
+                Button("Save to Library") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || readyCount == 0)
                 Button("Export PNG…") { doExport() }
-                    .buttonStyle(.bordered).disabled(cutout == nil)
+                    .buttonStyle(.bordered)
+                    .disabled(busy || readyCount == 0)
+                Spacer()
+                Text(status.isEmpty
+                     ? (readyCount > 0 ? "\(readyCount) cutout\(readyCount == 1 ? "" : "s") ready" : "Finding the subject…")
+                     : status)
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(20)
-        .frame(width: 560, height: 520)
+        .frame(width: 600, height: 560)
+        .onAppear { processAll() }
     }
 
-    private func run() {
-        guard let p = photo else { return }
+    private var doneCount: Int { results.values.count }
+    private var readyCount: Int { doneCount }
+
+    // MARK: preview
+
+    @ViewBuilder
+    private var previewArea: some View {
+        ZStack {
+            Checkerboard().clipShape(RoundedRectangle(cornerRadius: 10))
+            if let p = current, let img = results[p.id] {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(alignment: .bottomTrailing) {
+                        if background == .transparent {
+                            // Hint that transparency is real, not white.
+                            Text("transparent")
+                                .font(.caption2)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.thinMaterial, in: Capsule())
+                                .padding(6)
+                        }
+                    }
+            } else {
+                VStack(spacing: 8) {
+                    if busy {
+                        ProgressView()
+                        Text("Finding the subject…")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else if let p = current {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 34, weight: .light)).foregroundStyle(.tertiary)
+                        Text("No subject found in \(p.filename)")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: 300)
+        .overlay(alignment: .bottomLeading) {
+            if let p = current {
+                Text("\(p.filename)\(photos.count > 1 ? " · \(indexInBatch + 1) of \(photos.count)" : "")")
+                    .font(.caption)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                    .padding(6)
+            }
+        }
+    }
+
+    private var indexInBatch: Int {
+        guard let current else { return 0 }
+        return photos.firstIndex { $0.id == current.id } ?? 0
+    }
+
+    // MARK: background picker
+
+    private var backgroundPicker: some View {
+        HStack(spacing: 10) {
+            Text("Background").font(.callout)
+            Picker("", selection: Binding(
+                get: { backgroundKind },
+                set: { kind in
+                    switch kind {
+                    case 0: background = .transparent
+                    case 1: background = .color(.white)
+                    case 2: background = .color(.black)
+                    default: break
+                    }
+                }
+            )) {
+                Text("Transparent").tag(0)
+                Text("White").tag(1)
+                Text("Black").tag(2)
+                Text("Custom").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 320)
+            if backgroundKind == 3 {
+                ColorPicker("", selection: $customColor, supportsOpacity: false)
+                    .labelsHidden()
+            }
+            Spacer(minLength: 0)
+        }
+        .onChange(of: customColor) { _, c in
+            background = .color(NSColor(c))
+        }
+    }
+
+    private var backgroundKind: Int {
+        switch background {
+        case .transparent: return 0
+        case .color(let c):
+            if c == .white { return 1 }
+            if c == .black { return 2 }
+            return 3
+        }
+    }
+
+    // MARK: processing
+
+    /// Runs on appear, PhotoRoom-style: every selected photo is processed
+    /// once, in order; switching backgrounds afterwards is instant because
+    /// the transparent cutouts are cached.
+    private func processAll() {
+        guard !busy else { return }
         busy = true
+        status = ""
+        let list = photos
+        if let first = list.first { currentID = first.id }
         DispatchQueue.global(qos: .userInitiated).async {
-            let img = InstantAlpha.cutout(path: p.path)
+            for (i, p) in list.enumerated() {
+                DispatchQueue.main.async {
+                    currentID = p.id
+                    status = photos.count > 1 ? "Processing \(i + 1) of \(list.count)…" : ""
+                }
+                let img = InstantAlpha.cutout(path: p.path)
+                DispatchQueue.main.async {
+                    if let img {
+                        results[p.id] = img
+                    } else {
+                        status = "\(p.filename): no subject found — skipped."
+                    }
+                }
+            }
             DispatchQueue.main.async {
-                cutout = img
                 busy = false
-                status = img == nil ? "No subject found (try a clearer photo)." : "Cutout ready — export as PNG."
+                if !results.isEmpty {
+                    status = results.count == list.count
+                        ? "Done — pick a background and save."
+                        : "\(results.count) of \(list.count) cutouts ready."
+                }
+            }
+        }
+    }
+
+    // MARK: saving
+
+    private var exportFolder: URL {
+        let pics = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
+        return pics.appendingPathComponent("Galleria Exports", isDirectory: true)
+    }
+
+    /// Saves every ready cutout with the chosen background into the watched
+    /// Galleria Exports folder; the library picks the files up automatically.
+    private func save() {
+        let list = photos.filter { results[$0.id] != nil }
+        guard !list.isEmpty else { return }
+        try? FileManager.default.createDirectory(at: exportFolder, withIntermediateDirectories: true)
+        busy = true
+        status = "Saving…"
+        let bg = background
+        DispatchQueue.global(qos: .userInitiated).async {
+            var saved = 0
+            for p in list {
+                guard let cut = results[p.id] else { continue }
+                let img = InstantAlpha.flattened(cut, background: bg)
+                let stem = (p.filename as NSString).deletingPathExtension
+                let out = exportFolder.appendingPathComponent("\(stem)-cutout.png")
+                var url = out
+                var n = 1
+                while FileManager.default.fileExists(atPath: url.path) {
+                    url = exportFolder.appendingPathComponent("\(stem)-cutout-\(n).png")
+                    n += 1
+                }
+                if Editor.writeImage(img, to: url) { saved += 1 }
+            }
+            DispatchQueue.main.async {
+                busy = false
+                status = "Saved \(saved) file\(saved == 1 ? "" : "s") to Galleria Exports — they'll appear in the library."
             }
         }
     }
 
     private func doExport() {
-        guard let cutout, let p = photo else { return }
+        let list = photos.filter { results[$0.id] != nil }
+        guard !list.isEmpty else { return }
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.prompt = "Save PNG"
-        panel.message = "Choose a folder for the transparent PNG"
-        let pics = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
-        panel.directoryURL = pics.appendingPathComponent("Galleria Exports", isDirectory: true)
+        panel.message = "Choose a folder for the cutout PNGs"
+        panel.directoryURL = exportFolder
         guard panel.runModal() == .OK, let dest = panel.url ?? panel.directoryURL else { return }
         try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-        let out = dest.appendingPathComponent("\(p.filename)-cutout.png")
-        let ok = Editor.writeImage(cutout, to: out)
-        status = ok ? "Saved \(out.lastPathComponent)" : "Export failed"
+        busy = true
+        status = "Exporting…"
+        let bg = background
+        DispatchQueue.global(qos: .userInitiated).async {
+            var saved = 0
+            for p in list {
+                guard let cut = results[p.id] else { continue }
+                let img = InstantAlpha.flattened(cut, background: bg)
+                let stem = (p.filename as NSString).deletingPathExtension
+                if Editor.writeImage(img, to: dest.appendingPathComponent("\(stem)-cutout.png")) { saved += 1 }
+            }
+            DispatchQueue.main.async {
+                busy = false
+                status = "Exported \(saved) file\(saved == 1 ? "" : "s")."
+            }
+        }
     }
 }
 

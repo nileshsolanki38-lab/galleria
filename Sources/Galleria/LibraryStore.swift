@@ -17,6 +17,12 @@ final class LibraryStore: ObservableObject {
     @Published var status: String = ""
     @Published var totalCount: Int = 0
 
+    /// Quiet background index for People / Places / Duplicates. Views read the
+    /// finished tables; these numbers only drive a small progress hint.
+    @Published var discoverIndexed: Int = 0
+    @Published var discoverTotal: Int = 0
+    @Published var discoverDone: Bool = false
+
     private var statusClearWork: DispatchWorkItem?
 
     /// Shows a transient message in the status bar, then fades it out.
@@ -75,6 +81,9 @@ final class LibraryStore: ObservableObject {
         loadAlbums()
         loadSmartAlbums()
         refresh()
+        // People / Places / Duplicates build their caches quietly in the
+        // background over the whole library — no scan prompt, ever.
+        DiscoverIndexer.shared.start(store: self)
 
         // Catch anything that changed while the app was closed. This is incremental,
         // so unchanged files cost nothing more than a directory walk. Throttle to
@@ -154,6 +163,10 @@ final class LibraryStore: ObservableObject {
         CREATE TABLE IF NOT EXISTS face_counts(
             photo_id INTEGER PRIMARY KEY,
             faces INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS photo_hashes(
+            photo_id INTEGER PRIMARY KEY,
+            hash INTEGER NOT NULL DEFAULT 0
         );
         """)
 
@@ -379,6 +392,8 @@ final class LibraryStore: ObservableObject {
             }
             sqlite3_finalize(stmt)
             self.exec("DELETE FROM edits WHERE photo_id NOT IN (SELECT id FROM photos);")
+            self.exec("DELETE FROM face_counts WHERE photo_id NOT IN (SELECT id FROM photos);")
+            self.exec("DELETE FROM photo_hashes WHERE photo_id NOT IN (SELECT id FROM photos);")
             DispatchQueue.main.async {
                 self.loadFolders()
                 self.refresh()
@@ -546,6 +561,8 @@ final class LibraryStore: ObservableObject {
 
             if removed > 0 {
                 exec("DELETE FROM edits WHERE photo_id NOT IN (SELECT id FROM photos);")
+                exec("DELETE FROM face_counts WHERE photo_id NOT IN (SELECT id FROM photos);")
+                exec("DELETE FROM photo_hashes WHERE photo_id NOT IN (SELECT id FROM photos);")
             }
 
             sqlite3_exec(db, "COMMIT", nil, nil, nil)
@@ -950,6 +967,172 @@ final class LibraryStore: ObservableObject {
             if sqlite3_prepare_v2(db, "SELECT faces FROM face_counts WHERE photo_id = ?", -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_int64(stmt, 1, photoID)
                 if sqlite3_step(stmt) == SQLITE_ROW { out = Int(sqlite3_column_int(stmt, 0)) }
+            }
+            sqlite3_finalize(stmt)
+        }
+        return out
+    }
+
+    // MARK: - Discover index (faces / places / duplicates)
+
+    /// Sentinel latitude meaning "checked for GPS, none embedded", so the
+    /// indexer never loops over the same geotag-less photos.
+    static let noGeoLatitude: Double = 361
+
+    struct DiscoverWork: Equatable {
+        enum Kind: Equatable { case geo, hash, faces }
+        let kind: Kind
+        let photoID: Int64
+        let path: String
+    }
+
+    /// One photo missing a discover field. Geo is cheapest (EXIF header),
+    /// perceptual hash next (tiny decode), Vision face counting last.
+    func nextDiscoverWork() -> DiscoverWork? {
+        queue.sync {
+            func first(_ sql: String, _ kind: DiscoverWork.Kind) -> DiscoverWork? {
+                var stmt: OpaquePointer?
+                var out: DiscoverWork?
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+                   sqlite3_step(stmt) == SQLITE_ROW {
+                    let id = sqlite3_column_int64(stmt, 0)
+                    let path = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+                    out = DiscoverWork(kind: kind, photoID: id, path: path)
+                }
+                sqlite3_finalize(stmt)
+                return out
+            }
+            let faceSQL = """
+                SELECT p.id, p.path FROM photos p
+                LEFT JOIN face_counts fc ON fc.photo_id = p.id
+                WHERE fc.photo_id IS NULL LIMIT 1
+                """
+            let geoSQL = "SELECT p.id, p.path FROM photos p WHERE latitude IS NULL LIMIT 1"
+            let hashSQL = """
+                SELECT p.id, p.path FROM photos p
+                LEFT JOIN photo_hashes h ON h.photo_id = p.id
+                WHERE h.photo_id IS NULL LIMIT 1
+                """
+            return first(geoSQL, .geo) ?? first(hashSQL, .hash) ?? first(faceSQL, .faces)
+        }
+    }
+
+    func setGeo(photoID: Int64, latitude: Double, longitude: Double) {
+        queue.async {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(self.db, "UPDATE photos SET latitude=?, longitude=? WHERE id=?", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_double(stmt, 1, latitude)
+                sqlite3_bind_double(stmt, 2, longitude)
+                sqlite3_bind_int64(stmt, 3, photoID)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    func setHash(photoID: Int64, hash: Int64) {
+        queue.async {
+            var stmt: OpaquePointer?
+            let sql = "INSERT INTO photo_hashes(photo_id,hash) VALUES(?,?) ON CONFLICT(photo_id) DO UPDATE SET hash=excluded.hash"
+            if sqlite3_prepare_v2(self.db, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_int64(stmt, 1, photoID)
+                sqlite3_bind_int64(stmt, 2, hash)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    /// How much of the whole-library Discover index is still pending.
+    func discoverRemaining() -> Int {
+        queue.sync {
+            func count(_ sql: String) -> Int {
+                var stmt: OpaquePointer?
+                var n = 0
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+                   sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int(stmt, 0)) }
+                sqlite3_finalize(stmt)
+                return n
+            }
+            return count("SELECT COUNT(*) FROM photos WHERE latitude IS NULL")
+                + count("SELECT COUNT(*) FROM photos p LEFT JOIN photo_hashes h ON h.photo_id=p.id WHERE h.photo_id IS NULL")
+                + count("SELECT COUNT(*) FROM photos p LEFT JOIN face_counts fc ON fc.photo_id=p.id WHERE fc.photo_id IS NULL")
+        }
+    }
+
+    /// All photos with faces already indexed — powers People instantly.
+    func photosWithFaces() -> [(Photo, Int)] {
+        var out: [(Photo, Int)] = []
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT p.id,p.path,p.filename,p.folder,p.mtime,p.date,p.rating,p.favorite,p.caption,p.tags,p.width,p.height,fc.faces
+            FROM photos p JOIN face_counts fc ON fc.photo_id = p.id WHERE fc.faces > 0
+            """
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let p = Photo(
+                        id: sqlite3_column_int64(stmt, 0),
+                        path: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+                        filename: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "",
+                        folder: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+                        mtime: sqlite3_column_double(stmt, 4),
+                        date: sqlite3_column_double(stmt, 5),
+                        rating: Int(sqlite3_column_int(stmt, 6)),
+                        favorite: sqlite3_column_int(stmt, 7) != 0,
+                        caption: sqlite3_column_text(stmt, 8).map { String(cString: $0) } ?? "",
+                        tags: sqlite3_column_text(stmt, 9).map { String(cString: $0) } ?? "",
+                        width: Int(sqlite3_column_int(stmt, 10)),
+                        height: Int(sqlite3_column_int(stmt, 11)))
+                    out.append((p, Int(sqlite3_column_int(stmt, 12))))
+                }
+            }
+            sqlite3_finalize(stmt)
+        }
+        return out
+    }
+
+    /// Geotagged photos straight from the DB — no live EXIF reads on appear.
+    func geotaggedPhotos() -> [(Photo, Double, Double)] {
+        var out: [(Photo, Double, Double)] = []
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = """
+            SELECT p.id,p.path,p.filename,p.folder,p.mtime,p.date,p.rating,p.favorite,p.caption,p.tags,p.width,p.height,p.latitude,p.longitude
+            FROM photos p WHERE p.latitude BETWEEN -90 AND 90 AND p.longitude BETWEEN -180 AND 180
+            """
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let p = Photo(
+                        id: sqlite3_column_int64(stmt, 0),
+                        path: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+                        filename: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "",
+                        folder: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+                        mtime: sqlite3_column_double(stmt, 4),
+                        date: sqlite3_column_double(stmt, 5),
+                        rating: Int(sqlite3_column_int(stmt, 6)),
+                        favorite: sqlite3_column_int(stmt, 7) != 0,
+                        caption: sqlite3_column_text(stmt, 8).map { String(cString: $0) } ?? "",
+                        tags: sqlite3_column_text(stmt, 9).map { String(cString: $0) } ?? "",
+                        width: Int(sqlite3_column_int(stmt, 10)),
+                        height: Int(sqlite3_column_int(stmt, 11)))
+                    out.append((p, sqlite3_column_double(stmt, 12), sqlite3_column_double(stmt, 13)))
+                }
+            }
+            sqlite3_finalize(stmt)
+        }
+        return out
+    }
+
+    /// Perceptual hashes for the whole library, ready for similarity grouping.
+    func perceptualHashes() -> [(Int64, Int64)] {
+        var out: [(Int64, Int64)] = []
+        queue.sync {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT photo_id,hash FROM photo_hashes WHERE hash != 0", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    out.append((sqlite3_column_int64(stmt, 0), sqlite3_column_int64(stmt, 1)))
+                }
             }
             sqlite3_finalize(stmt)
         }

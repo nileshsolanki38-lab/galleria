@@ -74,6 +74,12 @@ struct ViewerView: View {
     @State private var showShortcuts = false
     @State private var showResize = false
     @State private var showInstantAlpha = false
+
+    // Adjustment presets: curated looks plus the user's own saved settings.
+    @State private var userPresets: [PhotoPreset] = []
+    @State private var presetThumbs: [UUID: NSImage] = [:]
+    @State private var showSavePreset = false
+    @State private var newPresetName = ""
     // Preview-style markup + style copy/paste (compact prefs like Preview).
     @State private var isMarkup = false
     @State private var markupTool: MarkupType = .rect
@@ -225,8 +231,15 @@ struct ViewerView: View {
         }
         .sheet(isPresented: $showInstantAlpha) {
             if let p = photo {
-                InstantAlphaSheet(photoID: p.id).environmentObject(library)
+                RemoveBackgroundSheet(photoIDs: [p.id]).environmentObject(library)
             }
+        }
+        .alert("Save Preset", isPresented: $showSavePreset) {
+            TextField("Preset name", text: $newPresetName)
+            Button("Save") { saveUserPreset(named: newPresetName) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your current adjustments — not crop, straighten or markup — will be saved and can be applied to any photo.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .galleriaShowShortcuts)) { _ in
             showShortcuts = true
@@ -293,6 +306,7 @@ struct ViewerView: View {
             chromeVisible = !startHidden
             fullScreenActive = isFullScreen
             installKeyMonitor()
+            userPresets = PresetLibrary.loadUserPresets()
             load()
             applyPresentationOnOpen()
         }
@@ -300,6 +314,7 @@ struct ViewerView: View {
             slideshowTask?.cancel()
             if let monitor { NSEvent.removeMonitor(monitor) }
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+            ScrollZoom.resetFrames()
             restoreWindowChrome()
         }
         // Load by identity, not position: if a rescan reorders the folder the
@@ -309,6 +324,15 @@ struct ViewerView: View {
         .onChange(of: currentPhotoID) { _, _ in
             resetView()
             load()
+        }
+        .onChange(of: showEdit) { _, visible in
+            if !visible { ScrollZoom.editPanelFrame = nil }
+        }
+        .onChange(of: showInfo) { _, visible in
+            if !visible { ScrollZoom.infoPanelFrame = nil }
+        }
+        .onChange(of: showFilmstrip) { _, visible in
+            if !visible { ScrollZoom.filmstripFrame = nil }
         }
         .onChange(of: zoom) { _, z in
             // In a compact window, dragging an unzoomed photo moves the window;
@@ -783,6 +807,9 @@ struct ViewerView: View {
             if showEdit {
                 HStack(alignment: .top, spacing: 0) {
                     editPanel
+                        // Hovering inside the edit panel scrolls only the panel;
+                        // the photo and filmstrip never react.
+                        .background { FrameReporter { ScrollZoom.editPanelFrame = $0 } }
                     Spacer(minLength: 0)
                 }
                 .padding(.leading, 16)
@@ -795,6 +822,7 @@ struct ViewerView: View {
                 HStack(alignment: .top, spacing: 0) {
                     Spacer(minLength: 0)
                     infoPanel
+                        .background { FrameReporter { ScrollZoom.infoPanelFrame = $0 } }
                 }
                 .padding(.trailing, 16)
                 .padding(.top, 84)
@@ -1166,6 +1194,11 @@ struct ViewerView: View {
         }
         .frame(maxWidth: .infinity)
         .glassSurface(cornerRadius: 18)
+        .background {
+            // Report the strip's exact window frame so the scroll monitor
+            // recognises it precisely (no size heuristics).
+            FrameReporter { ScrollZoom.filmstripFrame = $0 }
+        }
         .padding(.horizontal, isCompactWindow ? 8 : 16)
         .padding(.bottom, filmstripBottomPadding)
     }
@@ -1238,21 +1271,205 @@ struct ViewerView: View {
 
     // MARK: - Edit panel
 
-    private func editSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, format: String = "%+.2f") -> some View {
+/// A slider row whose value can also be typed in directly: the number beside
+/// the label is a small editable field (Return commits, focus-loss commits,
+/// values outside the range are clamped). Typing updates the same recipe value
+/// as dragging the slider.
+private struct NumericSliderRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var numberFormat: String = "%+.2f"
+    var suffix: String = ""
+    let commit: () -> Void
+
+    @State private var text = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 4) {
                 Text(title).font(.callout)
                 Spacer()
-                Text(String(format: format, value.wrappedValue))
+                TextField("", text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.mini)
+                    .multilineTextAlignment(.trailing)
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .frame(width: 54)
+                    .focused($fieldFocused)
+                    .onSubmit(submit)
+                    .onChange(of: fieldFocused) { _, focused in
+                        if focused {
+                            text = String(format: numberFormat, value)
+                        } else {
+                            submit()
+                        }
+                    }
+                if !suffix.isEmpty {
+                    Text(suffix)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             // No `step:` — macOS 26 draws tick marks below the track, and tight
             // steps fuse into a solid white line (seen under Straighten).
-            Slider(value: value, in: range)
+            Slider(value: $value, in: range)
                 .controlSize(.small)
-                .onChange(of: value.wrappedValue) { _, _ in commit() }
+                .onChange(of: value) { _, _ in commit() }
+                .onChange(of: value) { _, newValue in
+                    // Keep the field in sync while sliding, but never fight the
+                    // user's typing.
+                    if !fieldFocused {
+                        text = String(format: numberFormat, newValue)
+                    }
+                }
         }
+        .onAppear { text = String(format: numberFormat, value) }
+    }
+
+    private func submit() {
+        // Accept "0.3" and "0,3" alike; ignore anything non-numeric.
+        let normalized = text.replacingOccurrences(of: ",", with: ".")
+        if let parsed = Double(normalized) {
+            let clamped = min(max(parsed, range.lowerBound), range.upperBound)
+            if clamped != value {
+                value = clamped   // onChange fires commit()
+            }
+        }
+        text = String(format: numberFormat, value)
+    }
+}
+
+    // MARK: - Adjustment presets
+
+    private var allPresets: [PhotoPreset] { PresetLibrary.builtins + userPresets }
+
+    /// Curated looks + the user's saved settings, each shown with a live
+    /// thumbnail of the current photo so the look is obvious before applying.
+    private var presetsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Presets")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                Spacer()
+                Button {
+                    newPresetName = ""
+                    showSavePreset = true
+                } label: {
+                    Image(systemName: "plus.square.on.square")
+                }
+                .buttonStyle(.plain)
+                .disabled(recipe.isIdentity)
+                .help("Save the current adjustments as a preset")
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 62), spacing: 6)], spacing: 6) {
+                ForEach(allPresets) { preset in
+                    presetTile(preset)
+                }
+            }
+            .task(id: photo?.id) {
+                // Live thumbnails: the current photo rendered with each preset's
+                // look, small and cheap. Re-runs per photo, on a utility queue.
+                guard let p = photo else { return }
+                let path = p.path
+                let presets = allPresets
+                let thumbs = await Task.detached(priority: .utility) {
+                    var out: [UUID: NSImage] = [:]
+                    for preset in presets {
+                        if let img = Editor.render(path: path, recipe: preset.recipe, maxPixel: 132) {
+                            out[preset.id] = img
+                        }
+                    }
+                    return out
+                }.value
+                presetThumbs = thumbs
+            }
+        }
+    }
+
+    private func presetTile(_ preset: PhotoPreset) -> some View {
+        VStack(spacing: 3) {
+            ZStack {
+                Rectangle().fill(Color.gray.opacity(0.25))
+                if let thumb = presetThumbs[preset.id] {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Image(systemName: preset.isBuiltin ? "sparkles" : "heart.text.square")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 62, height: 44)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+            }
+            Text(preset.name)
+                .font(.caption2)
+                .lineLimit(1)
+                .frame(width: 62)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { applyPreset(preset) }
+        .contextMenu {
+            Button("Apply") { applyPreset(preset) }
+            if !preset.isBuiltin {
+                Divider()
+                Button("Delete Preset", role: .destructive) { deleteUserPreset(preset) }
+            }
+        }
+        .help("Apply \(preset.name)")
+    }
+
+    /// Presets carry the "look" only — the photo's own rotation, crop,
+    /// straighten and markups are never touched.
+    private func applyPreset(_ preset: PhotoPreset) {
+        let src = preset.recipe
+        recipe.exposure = src.exposure
+        recipe.brightness = src.brightness
+        recipe.contrast = src.contrast
+        recipe.fillLight = src.fillLight
+        recipe.highlights = src.highlights
+        recipe.shadows = src.shadows
+        recipe.warmth = src.warmth
+        recipe.saturation = src.saturation
+        recipe.sharpen = src.sharpen
+        recipe.vignette = src.vignette
+        recipe.filter = src.filter
+        recipe.autoEnhance = src.autoEnhance
+        commit()
+    }
+
+    private func saveUserPreset(named rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        // A saved preset is the current look, without this photo's geometry.
+        var snapshot = recipe
+        snapshot.rotation = 0
+        snapshot.flipH = false
+        snapshot.crop = nil
+        snapshot.straighten = 0
+        snapshot.markups = []
+        let preset = PhotoPreset(name: name, recipe: snapshot)
+        userPresets.append(preset)
+        PresetLibrary.saveUserPresets(userPresets)
+    }
+
+    private func deleteUserPreset(_ preset: PhotoPreset) {
+        userPresets.removeAll { $0.id == preset.id }
+        PresetLibrary.saveUserPresets(userPresets)
+        presetThumbs[preset.id] = nil
+    }
+
+    private func editSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, format: String = "%+.2f", suffix: String = "") -> some View {
+        NumericSliderRow(title: title, value: value, range: range,
+                         numberFormat: format, suffix: suffix, commit: { commit() })
     }
 
     // Compact Preview-style adjustments: small like Preview's panel (248), not 280.
@@ -1272,6 +1489,10 @@ struct ViewerView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    presetsSection
+
+                    Divider()
+
                     Button {
                         previewMarkupsRepair()
                     } label: {
@@ -1342,7 +1563,7 @@ struct ViewerView: View {
                     editSlider("Contrast", value: Binding(get: { recipe.contrast }, set: { recipe.contrast = $0 }), range: -1...1)
                     editSlider("Straighten", value: Binding(
                         get: { recipe.straighten },
-                        set: { recipe.straighten = ($0 * 10).rounded() / 10 }), range: -8...8, format: "%+.1f°")
+                        set: { recipe.straighten = ($0 * 10).rounded() / 10 }), range: -8...8, format: "%+.1f", suffix: "°")
 
                     Divider()
 
@@ -1385,7 +1606,7 @@ struct ViewerView: View {
                             Label("Resize…", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
                         Button { showInstantAlpha = true } label: {
-                            Label("Alpha", systemImage: "wand.and.stars")
+                            Label("Remove Background", systemImage: "wand.and.stars")
                         }
                     }
                     .buttonStyle(.bordered)
@@ -2105,8 +2326,8 @@ struct ViewerView: View {
                 return true
             }
 
-            // Over the info panel (or any other scroll view): native scrolling.
-            if ctx.overScrollView { return false }
+            // Over the info/edit panel or any other scroll view: native scrolling.
+            if ctx.overScrollView || ScrollZoom.overPanel(ctx.location) { return false }
 
             // Over the photo: scrolling zooms toward the pointer, fit or zoomed
             // alike. Arrows (and the filmstrip wheel) step through photos.
@@ -2217,6 +2438,24 @@ private enum ScrollZoom {
     /// instead of animating back to the selected thumbnail.
     static var suppressAutoCenterUntil = Date.distantPast
 
+    /// Exact window frames of the filmstrip and the floating panels, kept
+    /// current by FrameReporters. Scroll routing uses these instead of size
+    /// heuristics, so hovering the edit panel can never be mistaken for the
+    /// filmstrip (and the filmstrip is recognised however the layout changes).
+    static var filmstripFrame: CGRect?
+    static var editPanelFrame: CGRect?
+    static var infoPanelFrame: CGRect?
+
+    static func resetFrames() {
+        filmstripFrame = nil
+        editPanelFrame = nil
+        infoPanelFrame = nil
+    }
+
+    static func overPanel(_ point: CGPoint) -> Bool {
+        editPanelFrame?.contains(point) == true || infoPanelFrame?.contains(point) == true
+    }
+
     static func install(_ handler: @escaping (Context) -> Bool) -> Any {
         NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             // Synthetic events sometimes carry no window, so hit-test against the key window.
@@ -2229,7 +2468,7 @@ private enum ScrollZoom {
                 deltaY: event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12,
                 modifiers: event.modifierFlags,
                 location: point,
-                overFilmstrip: scroll.map(isFilmstrip) ?? false,
+                overFilmstrip: overFilmstrip(at: point, scroll: scroll),
                 overScrollView: scroll != nil
             )
             guard context.deltaX != 0 || context.deltaY != 0 else { return event }
@@ -2244,6 +2483,15 @@ private enum ScrollZoom {
             v = current.superview
         }
         return nil
+    }
+
+    private static func overFilmstrip(at point: CGPoint, scroll: NSScrollView?) -> Bool {
+        // Prefer the strip's real frame (kept current by a FrameReporter);
+        // only fall back to the shape heuristic before the first layout pass.
+        if let frame = filmstripFrame {
+            return frame.contains(point)
+        }
+        return scroll.map(isFilmstrip) ?? false
     }
 
     private static func isFilmstrip(_ scroll: NSScrollView) -> Bool {

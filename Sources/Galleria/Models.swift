@@ -184,6 +184,26 @@ struct CollageRecipe: Codable, Equatable {
     static let `default` = CollageRecipe()
 }
 
+extension CollageRecipe {
+    /// Issue #3: the collage maker remembers the last-used style across
+    /// sessions. Per-photo cell crops are intentionally not carried over.
+    private static let lastRecipeKey = "galleria.collage.lastRecipe"
+
+    static func loadLast() -> CollageRecipe {
+        guard let data = UserDefaults.standard.data(forKey: lastRecipeKey),
+              var recipe = try? JSONDecoder().decode(CollageRecipe.self, from: data) else {
+            return .default
+        }
+        recipe.cells = [:]
+        return recipe
+    }
+
+    func saveLast() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastRecipeKey)
+    }
+}
+
 // MARK: - Sidebar selection
 
 enum SidebarItem: Hashable {

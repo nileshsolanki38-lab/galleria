@@ -14,41 +14,69 @@ struct DuplicateGroup: Identifiable {
     let byteSize: Int64
 }
 
-/// Perceptual hash for duplicates: SHA256 of a tiny 32×32 render.
+/// Duplicate finder. A 64-bit difference hash (dHash) of each photo is stored
+/// by the background indexer, so grouping is over the whole library and finds
+/// near-duplicates (re-encodes, resized copies) — not just byte-identical files.
 enum DuplicateFinder {
-    static func contentHash(path: String) -> String? {
-        guard let cg = Imaging.baseCGImage(path: path, maxPixel: 64) else { return nil }
-        let w = cg.width, h = cg.height
-        let bpp = 4
-        let bytesPerRow = w * bpp
-        var pixels = [UInt8](repeating: 0, count: bytesPerRow * h)
+    /// 9×8 grayscale gradient hash → 64 bits. Same-looking images have a small
+    /// Hamming distance even if their pixels or dimensions differ.
+    static func perceptualHash(path: String) -> Int64? {
+        guard let cg = Imaging.baseCGImage(path: path, maxPixel: 32) else { return nil }
+        let w = 9, h = 8
+        var pixels = [UInt8](repeating: 0, count: w * h)
         pixels.withUnsafeMutableBytes { ptr in
             guard let ctx = CGContext(data: ptr.baseAddress, width: w, height: h,
-                                      bitsPerComponent: 8, bytesPerRow: bytesPerRow,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+                                      bitsPerComponent: 8, bytesPerRow: w,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
+            ctx.interpolationQuality = .medium
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         }
-        var rgb = Data()
-        rgb.reserveCapacity(w * h * 3)
-        for i in stride(from: 0, to: pixels.count, by: 4) {
-            rgb.append(pixels[i]); rgb.append(pixels[i + 1]); rgb.append(pixels[i + 2])
+        var hash: Int64 = 0
+        for y in 0..<h {
+            for x in 0..<(w - 1) {
+                if Int(pixels[y * w + x]) < Int(pixels[y * w + x + 1]) {
+                    hash |= 1 << Int64(y * 8 + x)
+                }
+            }
         }
-        return SHA256.hash(data: rgb).map { String(format: "%02x", $0) }.joined()
+        return hash
     }
 
-    static func groups(for photos: [Photo]) -> [DuplicateGroup] {
-        var byHash: [String: [Photo]] = [:]
-        var sizes: [String: Int64] = [:]
-        for p in photos {
-            guard let h = contentHash(path: p.path) else { continue }
-            byHash[h, default: []].append(p)
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: p.path),
-               let sz = attrs[.size] as? Int64 { sizes[h, default: 0] += sz }
+    static func hamming(_ a: Int64, _ b: Int64) -> Int {
+        (a ^ b).nonzeroBitCount
+    }
+
+    /// Groups hashes within `threshold` bits using union-find. O(n²) on a few
+    /// thousand 64-bit integers is a few milliseconds on a background queue.
+    static func groups(from hashes: [(photoID: Int64, hash: Int64)], threshold: Int = 7) -> [[Int64]] {
+        let items = hashes.filter { $0.hash != 0 }
+        let n = items.count
+        guard n > 1 else { return [] }
+        var parent = Array(0..<n)
+
+        func find(_ i: Int) -> Int {
+            var i = i
+            while parent[i] != i {
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            }
+            return i
         }
-        return byHash.filter { $0.value.count > 1 }
-            .map { DuplicateGroup(id: $0.key, photos: $0.value, byteSize: sizes[$0.key] ?? 0) }
-            .sorted { $0.photos.count > $1.photos.count }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+
+        for i in 0..<n {
+            for j in (i + 1)..<n where hamming(items[i].hash, items[j].hash) <= threshold {
+                union(i, j)
+            }
+        }
+        var clusters: [Int: [Int64]] = [:]
+        for i in 0..<n { clusters[find(i), default: []].append(items[i].photoID) }
+        return clusters.values.filter { $0.count > 1 }
+            .sorted { $0.count > $1.count }
     }
 }
 
@@ -201,7 +229,6 @@ struct FacesView: View {
     @EnvironmentObject var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var facePhotos: [(photo: Photo, faces: Int, thumb: NSImage?)] = []
-    @State private var scanning = false
     @State private var status = ""
 
     var body: some View {
@@ -209,8 +236,11 @@ struct FacesView: View {
             HStack {
                 Label("People — Faces", systemImage: "person.2.circle").font(.title3.weight(.semibold))
                 Spacer()
-                Button(scanning ? "Scanning…" : "Scan faces") { scan() }
-                    .buttonStyle(.borderedProminent).controlSize(.small).disabled(scanning)
+                if !library.discoverDone {
+                    Text("Indexing \(library.discoverIndexed)/\(library.discoverTotal)…")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ProgressView().controlSize(.small)
+                }
                 Button("Close") { dismiss() }.buttonStyle(.bordered).controlSize(.small)
             }
             .padding(14)
@@ -218,8 +248,8 @@ struct FacesView: View {
             if facePhotos.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "person.2.circle").font(.system(size: 44, weight: .light)).foregroundStyle(.tertiary)
-                    Text("Find photos with people").font(.headline)
-                    Text("Runs on-device Vision face detection (no upload). First scan checks up to 300 photos; faces are counted per file. Select a photo to open the viewer.")
+                    Text(library.discoverDone ? "No faces found" : "Looking for faces…").font(.headline)
+                    Text("Galleria quietly checks every photo with on-device Vision face detection — no upload, no scan button. Faces found here are counted per photo and ready instantly.")
                         .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
                     if !status.isEmpty { Text(status).font(.caption).foregroundStyle(.secondary) }
                 }
@@ -244,31 +274,18 @@ struct FacesView: View {
             }
         }
         .frame(width: 760, height: 540)
-        .onAppear { scan() }
+        .onAppear { refresh() }
+        .onChange(of: library.discoverIndexed) { _, _ in refresh() }
+        .onChange(of: library.discoverDone) { _, _ in refresh() }
     }
 
-    private func scan() {
-        scanning = true
-        status = "Scanning…"
-        let sample = Array(library.photos.prefix(300))
-        DispatchQueue.global(qos: .userInitiated).async {
-            var results: [(Photo, Int, NSImage?)] = []
-            for (i, p) in sample.enumerated() {
-                let n = FaceDetector.faceCount(path: p.path)
-                if n > 0 {
-                    let thumb = ThumbnailService.shared.cachedThumbnail(path: p.path, mtime: p.mtime)
-                    results.append((p, n, thumb))
-                }
-                if i % 30 == 0 {
-                    DispatchQueue.main.async { status = "Scanning… \(i)/\(sample.count)" }
-                }
-            }
-            DispatchQueue.main.async {
-                facePhotos = results.sorted { $0.1 > $1.1 }
-                scanning = false
-                status = results.isEmpty ? "No faces found in sampled photos." : "\(results.count) photos with faces"
-            }
-        }
+    /// Reads the persistent index instead of rescanning. Newly added photos
+    /// are picked up by the background indexer and appear here automatically.
+    private func refresh() {
+        let rows = library.photosWithFaces()
+        facePhotos = rows.map { (photo: $0.0, faces: $0.1, thumb: ThumbnailService.shared.cachedThumbnail(path: $0.0.path, mtime: $0.0.mtime)) }
+            .sorted { $0.faces > $1.faces }
+        status = library.discoverDone ? "\(facePhotos.count) photos with faces" : ""
     }
 }
 
@@ -340,14 +357,17 @@ struct PlacesView: View {
             }
         }
         .frame(width: 860, height: 540)
-        .onAppear {
-            geotagged = library.photos.compactMap { p in
-                GeoHelper.coordinate(path: p.path).map { (p, $0) }
-            }
-            if let first = geotagged.first?.coord {
-                center = first
-            }
-        }
+        .onAppear { refresh() }
+        .onChange(of: library.discoverIndexed) { _, _ in refresh() }
+        .onChange(of: library.discoverDone) { _, _ in refresh() }
+    }
+
+    /// Coordinates are cached by the background indexer — no live EXIF reads
+    /// on appear, and the whole library is covered rather than the current grid.
+    private func refresh() {
+        let rows = library.geotaggedPhotos()
+        geotagged = rows.map { (photo: $0.0, coord: CLLocationCoordinate2D(latitude: $0.1, longitude: $0.2)) }
+        if let first = geotagged.first?.coord { center = first }
     }
 }
 
@@ -449,7 +469,12 @@ struct DuplicatesView: View {
             HStack {
                 Label("Duplicate Finder", systemImage: "square.stack").font(.title3.weight(.semibold))
                 Spacer()
-                Button(scanning ? "Scanning…" : "Find duplicates") { run() }
+                if !library.discoverDone {
+                    Text("Indexing \(library.discoverIndexed)/\(library.discoverTotal)…")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ProgressView().controlSize(.small)
+                }
+                Button("Find duplicates") { run() }
                     .buttonStyle(.borderedProminent).controlSize(.small).disabled(scanning)
                 Button("Close") { dismiss() }.buttonStyle(.bordered).controlSize(.small)
             }
@@ -461,8 +486,8 @@ struct DuplicatesView: View {
             } else if groups.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "square.stack").font(.system(size: 44, weight: .light)).foregroundStyle(.tertiary)
-                    Text(status.isEmpty ? "Exact duplicate groups will appear here" : status).font(.headline)
-                    Text("Groups by perceptual hash (ignores tiny re-encodes). Tick the copies you want to keep out, then reveal one in Finder to delete manually — Galleria never deletes files for you.")
+                    Text(status.isEmpty ? "No near-duplicates found" : status).font(.headline)
+                    Text("Galleria compares a 64-bit visual fingerprint of every photo in the background — resized copies and re-encodes included. Tick the copies you want to keep out, then reveal one in Finder to delete manually. Galleria never deletes files for you.")
                         .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
                 }
                 .padding(40)
@@ -509,18 +534,30 @@ struct DuplicatesView: View {
         }
         .frame(width: 820, height: 560)
         .onAppear { if groups.isEmpty { run() } }
+        .onChange(of: library.discoverDone) { _, done in if done { run() } }
     }
 
+    /// Reads the persistent perceptual hashes — no rescan, no 500-photo cap.
     private func run() {
         scanning = true
-        status = "Hashing…"
-        let sample = Array(library.photos.prefix(500))
+        status = "Comparing visual fingerprints…"
+        let hashes = library.perceptualHashes()
         DispatchQueue.global(qos: .userInitiated).async {
-            let g = DuplicateFinder.groups(for: sample)
+            let clusters = DuplicateFinder.groups(from: hashes.map { (photoID: $0.0, hash: $0.1) })
+            var result: [DuplicateGroup] = []
+            for ids in clusters {
+                let photos = LibraryStore.shared.photos(withIDs: ids)
+                let bytes = photos.reduce(Int64(0)) { total, p in
+                    total + ((try? FileManager.default.attributesOfItem(atPath: p.path)[.size] as? Int64) ?? 0)
+                }
+                result.append(DuplicateGroup(id: "\(ids.first ?? 0)", photos: photos, byteSize: bytes))
+            }
             DispatchQueue.main.async {
-                groups = g
+                groups = result
                 scanning = false
-                status = g.isEmpty ? "No duplicates in scanned set." : "\(g.count) groups"
+                status = library.discoverDone
+                    ? (result.isEmpty ? "No near-duplicates found" : "\(result.count) groups")
+                    : "Indexing \(library.discoverIndexed)/\(library.discoverTotal) — more results appear as it finishes"
             }
         }
     }

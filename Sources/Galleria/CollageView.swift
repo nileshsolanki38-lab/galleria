@@ -9,7 +9,7 @@ struct CollageView: View {
     @Environment(\.dismiss) private var dismiss
     let photoIDs: [Int64]
 
-    @State private var recipe = CollageRecipe.default
+    @State private var recipe = CollageRecipe.loadLast()
     @State private var preview: CollageEngine.Result?
     @State private var status = ""
     @State private var photos: [Photo] = []
@@ -389,7 +389,10 @@ struct CollageView: View {
         }
         .frame(width: 960, height: 660)
         .onAppear { resolvePhotos(); renderSoon() }
-        .onChange(of: recipe) { _, _ in renderSoon() }
+        .onChange(of: recipe) { _, newRecipe in
+            newRecipe.saveLast()   // issue #3: remember layout/canvas/background
+            renderSoon()
+        }
     }
 
     // MARK: - Top-bar controls

@@ -62,7 +62,16 @@ struct ContentView: View {
     @State private var showDuplicates = false
     @State private var showBatch = false
     @State private var showSmartAlbums = false
+    @State private var showRemoveBackground = false
+    @State private var removeBackgroundIDs: [Int64] = []
     @State private var newAlbumName = ""
+
+    /// True whenever any sheet (collage, faces, duplicates…) covers the window;
+    /// the fast-scroll monitor must not amplify scrolling inside those sheets.
+    private var anySheetOpen: Bool {
+        showShortcuts || showCollage || showCompare || showFaces || showPlaces
+            || showDuplicates || showBatch || showSmartAlbums || showNewAlbum
+    }
     @State private var gridWidth: CGFloat = 800
     @State private var scrollTargetID: Int64? = nil
     @State private var openRequestToken = UUID()
@@ -136,6 +145,12 @@ struct ContentView: View {
                     }
                 )
                 .frame(width: 0, height: 0)
+                // Two-finger scrolling inside the photo grid is amplified ~4×;
+                // everywhere else (sidebar, sheets, viewer) scrolls natively.
+                GridScrollMonitor(
+                    isActive: { viewerIndex == nil && !anySheetOpen }
+                )
+                .frame(width: 0, height: 0)
             }
 
             // The viewer is an in-window overlay rather than a sheet so it can go
@@ -202,6 +217,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showBatch) {
             BatchToolsView(photoIDs: Array(selectedIDs)).environmentObject(library)
+        }
+        .sheet(isPresented: $showRemoveBackground) {
+            RemoveBackgroundSheet(photoIDs: removeBackgroundIDs)
+                .environmentObject(library)
         }
         .sheet(isPresented: $showSmartAlbums) {
             SmartAlbumsView().environmentObject(library)
@@ -394,6 +413,12 @@ struct ContentView: View {
                                                 selectedIDs = Set(ids)
                                                 showBatch = true
                                             }
+                                            Button("Remove Background…") {
+                                                var ids = Array(selectedIDs)
+                                                if !ids.contains(photo.id) { ids.append(photo.id) }
+                                                removeBackgroundIDs = ids
+                                                showRemoveBackground = true
+                                            }
                                             Button(photo.favorite ? "Remove from Favorites" : "Add to Favorites") {
                                                 setFavorite(photo.id, favorite: !photo.favorite)
                                             }
@@ -447,6 +472,11 @@ struct ContentView: View {
             }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
+        // Keep the grid's exact window-frame up to date so the scroll-speed
+        // monitor only amplifies inside this region.
+        .background {
+            FrameReporter { GridScroll.frame = $0 }
+        }
         .background {
             GeometryReader { geo in
                 Color.clear
@@ -1109,6 +1139,129 @@ private struct GridKeyMonitor: NSViewRepresentable {
                 case 36, 76: self.onOpen(); return nil       // Return / keypad Enter
                 default: return event
                 }
+            }
+        }
+
+        func remove() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        deinit { remove() }
+    }
+}
+
+// MARK: - Window frame probe
+
+/// Reports a SwiftUI view's frame in window coordinates to a closure. Used to
+/// give scroll handling exact region geometry instead of guesswork: the grid
+/// scroll-speed monitor needs the grid's bounds, and the viewer needs the
+/// filmstrip's and floating panels' bounds to route scroll events correctly.
+struct FrameReporter: NSViewRepresentable {
+    var onChange: (CGRect) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = Probe(onChange: onChange)
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? Probe)?.onChange = onChange
+        (nsView as? Probe)?.report()
+    }
+
+    func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        (nsView as? Probe)?.onChange = { _ in }
+    }
+
+    final class Probe: NSView {
+        var onChange: (CGRect) -> Void
+
+        init(onChange: @escaping (CGRect) -> Void) {
+            self.onChange = onChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+        override func layout() {
+            super.layout()
+            report()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            report()
+        }
+
+        func report() {
+            guard window != nil, bounds.width > 0 else { return }
+            onChange(convert(bounds, to: nil))   // window base coordinates
+        }
+    }
+}
+
+// MARK: - Fast grid scrolling
+
+/// Multiplies scroll-wheel deltas inside the photo grid so two-finger scrolling
+/// covers a large library quickly. Scoped by exact frame: the sidebar, status
+/// bar and everything outside the grid scroll at native speed.
+enum GridScroll {
+    /// The grid's scroll view bounds in window coordinates (kept current by a
+    /// FrameReporter).
+    static var frame: CGRect = .zero
+
+    static let multiplier: CGFloat = 4
+
+    static func scaledEvent(_ event: NSEvent) -> NSEvent? {
+        guard let cg = event.cgEvent else { return nil }
+        let factor: Double
+        if event.hasPreciseScrollingDeltas {
+            factor = Double(multiplier)
+        } else {
+            // Line-delta events (classic mouse wheels) are already chunky;
+            // a smaller boost keeps them from jumping whole screens.
+            factor = 2
+        }
+        cg.setDoubleValueField(.scrollWheelEventDeltaAxis1,
+                               value: event.scrollingDeltaY * factor)
+        return NSEvent(cgEvent: cg)
+    }
+}
+
+private struct GridScrollMonitor: NSViewRepresentable {
+    let isActive: () -> Bool
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install(isActive: isActive)
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.install(isActive: isActive)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator {
+        private var monitor: Any?
+        private var isActive: () -> Bool = { false }
+
+        func install(isActive: @escaping () -> Bool) {
+            self.isActive = isActive
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, self.isActive() else { return event }
+                // Leave modifier scrolls (⌘/⌥ zoom-style gestures) alone.
+                guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return event }
+                guard let window = event.window ?? NSApp.keyWindow else { return event }
+                let point = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+                guard GridScroll.frame.contains(point) else { return event }
+                return GridScroll.scaledEvent(event) ?? event
             }
         }
 
