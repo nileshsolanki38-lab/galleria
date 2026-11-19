@@ -200,6 +200,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showCollage) {
             CollageView(photoIDs: collageIDs)
+                .id(collageIDs)   // recreate if the selection arrives with the presentation
                 .environmentObject(library)
         }
         .sheet(isPresented: $showCompare) {
@@ -389,6 +390,11 @@ struct ContentView: View {
                                         )
                                         .id(photo.id)
                                         .contextMenu {
+                                            // Capture the multi-selection when the menu is built. A right
+                                            // click can clear/replace `selectedIDs` before the action runs,
+                                            // which used to open an empty collage dialog.
+                                            let ids: [Int64] = selectedIDs.contains(photo.id)
+                                                ? Array(selectedIDs) : [photo.id]
                                             Button("Open") { openViewer(at: section.startIndex + offset) }
                                             Button("Show in Finder") { showInFinder(photo) }
                                             Button("Copy Filename") {
@@ -396,26 +402,18 @@ struct ContentView: View {
                                                 NSPasteboard.general.setString(photo.filename, forType: .string)
                                             }
                                             Button("Make Collage…") {
-                                                var ids = Array(selectedIDs)
-                                                if !ids.contains(photo.id) { ids.append(photo.id) }
                                                 collageIDs = ids
                                                 showCollage = true
                                             }
                                             Button("Compare Selection…") {
-                                                var ids = Array(selectedIDs)
-                                                if !ids.contains(photo.id) { ids.append(photo.id) }
                                                 selectedIDs = Set(ids.prefix(4))
                                                 showCompare = true
                                             }
                                             Button("Batch Resize / Convert…") {
-                                                var ids = Array(selectedIDs)
-                                                if !ids.contains(photo.id) { ids.append(photo.id) }
                                                 selectedIDs = Set(ids)
                                                 showBatch = true
                                             }
                                             Button("Remove Background…") {
-                                                var ids = Array(selectedIDs)
-                                                if !ids.contains(photo.id) { ids.append(photo.id) }
                                                 removeBackgroundIDs = ids
                                                 showRemoveBackground = true
                                             }
@@ -749,6 +747,15 @@ struct ContentView: View {
             }
             .disabled(selectedIDs.isEmpty)
             .help("Make a collage from the selection (Picasa-style)")
+
+            Button {
+                removeBackgroundIDs = Array(selectedIDs)
+                showRemoveBackground = true
+            } label: {
+                Label("Remove BG", systemImage: "wand.and.stars")
+            }
+            .disabled(selectedIDs.isEmpty)
+            .help("Remove background from the selected photos (offline AI)")
 
             Button {
                 showCompare = true

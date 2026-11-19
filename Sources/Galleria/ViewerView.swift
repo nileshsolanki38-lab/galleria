@@ -903,6 +903,11 @@ struct ViewerView: View {
             iconButton("slider.horizontal.3", help: "Adjustments (E)", active: showEdit) {
                 showEdit.toggle()
             }
+            if topBarShowUtilities || contentWidth >= 520 {
+                iconButton("wand.and.stars", help: "Remove Background — cut out the subject") {
+                    showInstantAlpha = true
+                }
+            }
             iconButton("arrow.up.left.and.arrow.down.right", help: "Full screen (F)") {
                 toggleFullScreen()
             }

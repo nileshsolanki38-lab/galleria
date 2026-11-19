@@ -6,8 +6,9 @@
 
 <p align="center">
   <strong>A Picasa-style, folder-based photo library for macOS.</strong><br/>
-  Fast, private, open-source photo manager: instant library, non-destructive editor, collages, faces &amp; places — 100 % on your Mac.<br/>
-  Free · Offline · No account · No import step · Nothing ever copied, moved or renamed.
+  Fast, private, open-source photo manager and image viewer: instant folder library, non-destructive photo editor with presets, offline AI background remover, collage maker, face detection and a places map — 100 % on your Mac.<br/>
+  Free · Offline · No account · No import step · Nothing ever copied, moved or renamed.<br/>
+  <sub>macOS 14 · Swift · SwiftUI · photo organizer · photo gallery · image editor · background removal · privacy-first · local-first</sub>
 </p>
 
 <p align="center">
