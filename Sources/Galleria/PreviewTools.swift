@@ -6,17 +6,6 @@ import ImageIO
 /// Preview-style tools: Resize, Instant Alpha (remove background), Markup helpers,
 /// Copy/Paste style — compact like Preview's Tools / Adjust Size.
 
-enum RetouchMode: String {
-    case keep, erase
-}
-
-struct RetouchStroke: Identifiable {
-    let id = UUID()
-    var mode: RetouchMode
-    /// Points normalised to the image (0...1), top-left origin.
-    var points: [CGPoint]
-}
-
 enum InstantAlpha {
     /// Result background after the subject is lifted.
     enum Background: Equatable {
@@ -69,14 +58,11 @@ enum InstantAlpha {
     }
 
     /// Flattens a transparent cutout onto a solid background colour, keeping
-    /// the cutout's pixel size. Nil background returns the cutout unchanged.
-    /// `strokes` are optional manual refinements: "keep" restores opacity in
-    /// areas the AI missed, "erase" removes areas you don't want.
-    static func flattened(_ cutout: NSImage, background: Background,
-                          strokes: [RetouchStroke] = []) -> NSImage {
-        let base = strokes.isEmpty ? cutout : retouched(cutout, with: strokes)
-        guard case .color(let color) = background else { return base }
-        let size = base.size
+    /// the cutout's pixel size. Transparent background returns the cutout
+    /// unchanged.
+    static func flattened(_ cutout: NSImage, background: Background) -> NSImage {
+        guard case .color(let color) = background else { return cutout }
+        let size = cutout.size
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                          isPlanar: false, colorSpaceName: .deviceRGB,
@@ -87,43 +73,12 @@ enum InstantAlpha {
         NSGraphicsContext.current = ctx
         color.setFill()
         NSRect(origin: .zero, size: size).fill()
-        base.draw(in: NSRect(origin: .zero, size: size),
-                  from: NSRect(origin: .zero, size: size),
-                  operation: .sourceOver, fraction: 1.0)
+        cutout.draw(in: NSRect(origin: .zero, size: size),
+                    from: NSRect(origin: .zero, size: size),
+                    operation: .sourceOver, fraction: 1.0)
         NSGraphicsContext.restoreGraphicsState()
         guard let cg = rep.cgImage else { return cutout }
         return NSImage(cgImage: cg, size: size)
-    }
-
-    /// Paints the user's Keep / Erase strokes into the cutout's alpha channel.
-    static func retouched(_ cutout: NSImage, with strokes: [RetouchStroke]) -> NSImage {
-        guard let cg = cutout.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return cutout }
-        let w = cg.width, h = cg.height
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return cutout }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        ctx.setLineWidth(CGFloat(max(8, w / 160)))   // ~1.6 cm brush at export size
-        for stroke in strokes where stroke.points.count > 1 {
-            if stroke.mode == .erase {
-                ctx.setBlendMode(.clear)
-            } else {
-                ctx.setBlendMode(.normal)
-                ctx.setStrokeColor(red: 1, green: 1, blue: 1, alpha: 1)
-            }
-            ctx.beginPath()
-            for (i, pt) in stroke.points.enumerated() {
-                // Image points are normalised from the top-left; CG's bitmap
-                // context has its origin in the bottom-left.
-                let p = CGPoint(x: pt.x * CGFloat(w), y: (1 - pt.y) * CGFloat(h))
-                if i == 0 { ctx.move(to: p) } else { ctx.addLine(to: p) }
-            }
-            ctx.strokePath()
-        }
-        guard let out = ctx.makeImage() else { return cutout }
-        return NSImage(cgImage: out, size: cutout.size)
     }
 }
 
@@ -284,11 +239,6 @@ struct RemoveBackgroundSheet: View {
     @State private var status = ""
     @State private var background: InstantAlpha.Background = .transparent
     @State private var customColor: Color = .white
-    /// Manual refinement: paint over missed areas to Keep, or unwanted areas
-    /// to Erase. Stored normalised so each photo in a batch can reuse them.
-    @State private var retouchMode: RetouchMode? = nil
-    @State private var strokes: [RetouchStroke] = []
-    @State private var activeStroke: RetouchStroke?
 
     private var photos: [Photo] {
         photoIDs.compactMap { id in library.photos.first { $0.id == id } }
@@ -321,8 +271,6 @@ struct RemoveBackgroundSheet: View {
 
             previewArea
 
-            retouchBar
-
             backgroundPicker
 
             HStack {
@@ -340,7 +288,7 @@ struct RemoveBackgroundSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 600, height: 560)
+        .frame(width: 600, height: 620)
         .onAppear { processAll() }
     }
 
@@ -367,46 +315,6 @@ struct RemoveBackgroundSheet: View {
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(.thinMaterial, in: Capsule())
                                 .padding(6)
-                        }
-                    }
-                    .overlay {
-                        // Paint directly on the preview to refine the AI mask.
-                        GeometryReader { geo in
-                            let ir = imageRect(container: geo.size, imageSize: img.size)
-                            Path { path in
-                                for stroke in strokes + [activeStroke].compactMap({ $0 }) {
-                                    for (i, pt) in stroke.points.enumerated() {
-                                        let q = CGPoint(x: ir.minX + pt.x * ir.width,
-                                                        y: ir.minY + pt.y * ir.height)
-                                        if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
-                                    }
-                                }
-                            }
-                            .stroke(retouchMode == .erase ? Color.red.opacity(0.8) : Color.orange.opacity(0.85),
-                                    style: StrokeStyle(lineWidth: 14, lineCap: .round, lineJoin: .round))
-                            .allowsHitTesting(false)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        guard let mode = retouchMode else { return }
-                                        let nx = (value.location.x - ir.minX) / ir.width
-                                        let ny = (value.location.y - ir.minY) / ir.height
-                                        let p = CGPoint(x: min(max(nx, 0), 1), y: min(max(ny, 0), 1))
-                                        if activeStroke == nil {
-                                            activeStroke = RetouchStroke(mode: mode, points: [p])
-                                        } else if activeStroke?.points.last != p {
-                                            activeStroke?.points.append(p)
-                                        }
-                                    }
-                                    .onEnded { _ in
-                                        if let s = activeStroke {
-                                            strokes.append(s)
-                                            activeStroke = nil
-                                            status = "Refined — Save to apply."
-                                        }
-                                    }
-                            )
                         }
                     }
             } else {
@@ -441,75 +349,43 @@ struct RemoveBackgroundSheet: View {
         return photos.firstIndex { $0.id == current.id } ?? 0
     }
 
-    // MARK: manual refinement
-
-    private func imageRect(container: CGSize, imageSize: CGSize) -> CGRect {
-        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
-        let scale = min(container.width / imageSize.width, container.height / imageSize.height)
-        let w = imageSize.width * scale, h = imageSize.height * scale
-        return CGRect(x: (container.width - w) / 2, y: (container.height - h) / 2,
-                      width: w, height: h)
-    }
-
-    private var retouchBar: some View {
-        HStack(spacing: 8) {
-            Text("Refine").font(.callout).foregroundStyle(.secondary)
-            Button {
-                retouchMode = retouchMode == .keep ? nil : .keep
-            } label: {
-                Label("Keep area", systemImage: "hand.draw.fill")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(retouchMode == .keep ? Color.accentColor : nil)
-            Button {
-                retouchMode = retouchMode == .erase ? nil : .erase
-            } label: {
-                Label("Erase area", systemImage: "eraser")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(retouchMode == .erase ? Color.red : nil)
-            if !strokes.isEmpty {
-                Button("Undo") {
-                    strokes.removeLast()
-                }
-                .buttonStyle(.plain).font(.caption)
-                Button("Clear") {
-                    strokes.removeAll()
-                }
-                .buttonStyle(.plain).font(.caption)
-            }
-            Spacer(minLength: 0)
-            if retouchMode != nil {
-                Text("Drag on the preview").font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-    }
-
     // MARK: background picker
 
     private struct BackgroundChoice: Identifiable {
         let id = UUID()
         let name: String
         let swatch: Color
+        let purpose: String
         let apply: (RemoveBackgroundSheet) -> Void
     }
 
     /// Explicit buttons instead of a 4-up segmented control: "Transparent" is
-    /// too long for one segment and used to collide with its neighbours.
+    /// too long for one segment and used to collide with its neighbours. Each
+    /// option explains what it is for, so choosing one is obvious.
     private var backgroundChoices: [BackgroundChoice] {
-        [BackgroundChoice(name: "Transparent", swatch: Color(white: 0.75).opacity(0.35)) { $0.background = .transparent },
-         BackgroundChoice(name: "White", swatch: .white) { $0.background = .color(.white) },
-         BackgroundChoice(name: "Black", swatch: .black) { $0.background = .color(.black) },
-         BackgroundChoice(name: "Grey", swatch: Color(white: 0.6)) { $0.background = .color(NSColor(white: 0.6, alpha: 1)) },
-         BackgroundChoice(name: "Custom", swatch: customColor) { $0.background = .color(NSColor(customColor)) }]
+        [BackgroundChoice(name: "Transparent", swatch: Color(white: 0.75).opacity(0.35),
+                          purpose: "Stickers, overlays and design work — keeps PNG transparency so you can place the subject on any background.",
+                          apply: { $0.background = .transparent }),
+         BackgroundChoice(name: "White", swatch: .white,
+                          purpose: "Product photos, ID photos and catalogues — a clean white backdrop makes the subject look professional.",
+                          apply: { $0.background = .color(.white) }),
+         BackgroundChoice(name: "Black", swatch: .black,
+                          purpose: "Portraits and dramatic artwork — a dark backdrop makes light subjects stand out.",
+                          apply: { $0.background = .color(.black) }),
+         BackgroundChoice(name: "Grey", swatch: Color(white: 0.6),
+                          purpose: "Thumbnails and avatars — a neutral background that suits almost any subject.",
+                          apply: { $0.background = .color(NSColor(white: 0.6, alpha: 1)) }),
+         BackgroundChoice(name: "Custom", swatch: customColor,
+                          purpose: "Match a brand colour, team colour or slide background — use the colour swatch above to pick it.",
+                          apply: { $0.background = .color(NSColor(customColor)) })]
     }
 
     private var backgroundPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text("Background").font(.callout)
+                Text("The AI keeps only the subject — choose what goes behind it.")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
                 ColorPicker("Custom", selection: $customColor, supportsOpacity: false)
                     .labelsHidden()
@@ -544,7 +420,16 @@ struct RemoveBackgroundSheet: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .help(choice.purpose)
                 }
+            }
+            if let selected = backgroundChoices.first(where: { isSelected($0) }) {
+                Text(selected.purpose)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
             }
         }
         .onChange(of: customColor) { _, c in
@@ -622,7 +507,7 @@ struct RemoveBackgroundSheet: View {
             var saved = 0
             for p in list {
                 guard let cut = results[p.id] else { continue }
-                let img = InstantAlpha.flattened(cut, background: bg, strokes: strokes)
+                let img = InstantAlpha.flattened(cut, background: bg)
                 let stem = (p.filename as NSString).deletingPathExtension
                 let out = exportFolder.appendingPathComponent("\(stem)-cutout.png")
                 var url = out
@@ -659,7 +544,7 @@ struct RemoveBackgroundSheet: View {
             var saved = 0
             for p in list {
                 guard let cut = results[p.id] else { continue }
-                let img = InstantAlpha.flattened(cut, background: bg, strokes: strokes)
+                let img = InstantAlpha.flattened(cut, background: bg)
                 let stem = (p.filename as NSString).deletingPathExtension
                 if Editor.writeImage(img, to: dest.appendingPathComponent("\(stem)-cutout.png")) { saved += 1 }
             }
